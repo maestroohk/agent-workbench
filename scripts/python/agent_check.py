@@ -3,6 +3,11 @@
 Performs a lightweight validation of the repository: detects the stack,
 verifies the .agent directory exists, checks for obvious missing files,
 and prints a structured report.
+
+If `firstmate` and/or `no-mistakes` are installed, the check is extended
+with `firstmate doctor` (+ optional `firstmate build`) and
+`no-mistakes check --all` so a single run covers project structure,
+toolchain health, and pre-push validation.
 """
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import agent_doctor
 from detect_stack import detect_stack
 from scan_repo import AGENT_DIR_NAME, SUMMARIES
 from utils import die, find_repo_root, info
@@ -44,7 +50,48 @@ def _check_no_secrets(repo: Path) -> list[str]:
     return issues
 
 
-def run_check(repo: Path) -> int:
+def _check_firstmate(repo: Path, findings: list[tuple[str, str]]) -> None:
+    if not agent_doctor.firstmate_present(repo):
+        return
+    rc, output = agent_doctor.run_doctor(repo)
+    if rc == 127:
+        findings.append(("warn", output.strip()))
+        return
+    if rc != 0:
+        findings.append(("err", f"firstmate doctor failed (rc={rc})"))
+    else:
+        findings.append(("ok", "firstmate doctor passed"))
+    for line in output.splitlines()[:20]:
+        if line.strip():
+            findings.append(("info", f"firstmate: {line.strip()[:120]}"))
+
+
+def _check_firstmate_build(repo: Path, findings: list[tuple[str, str]]) -> None:
+    if not agent_doctor.firstmate_present(repo):
+        return
+    rc, output = agent_doctor.run_build(repo)
+    if rc == 127:
+        return
+    if rc != 0:
+        findings.append(("warn", f"firstmate build failed (rc={rc})"))
+    else:
+        findings.append(("ok", "firstmate build passed"))
+
+
+def _check_no_mistakes(repo: Path, findings: list[tuple[str, str]]) -> None:
+    rc, output = agent_doctor.run_no_mistakes_check(repo)
+    if rc == 127:
+        return  # not installed, no message
+    if rc != 0:
+        findings.append(("err", f"no-mistakes check failed (rc={rc})"))
+    else:
+        findings.append(("ok", "no-mistakes check passed"))
+    for line in output.splitlines()[:20]:
+        if line.strip():
+            findings.append(("info", f"no-mistakes: {line.strip()[:120]}"))
+
+
+def run_check(repo: Path, *, with_firstmate: bool = True, with_no_mistakes: bool = True) -> int:
     findings: list[tuple[str, str]] = []
     matches = detect_stack(repo)
     if not matches:
@@ -59,6 +106,12 @@ def run_check(repo: Path) -> int:
         findings.append(("info", note))
     for issue in _check_no_secrets(repo):
         findings.append(("warn", issue))
+
+    if with_firstmate:
+        _check_firstmate(repo, findings)
+        _check_firstmate_build(repo, findings)
+    if with_no_mistakes:
+        _check_no_mistakes(repo, findings)
 
     has_error = False
     for level, message in findings:
@@ -78,10 +131,24 @@ def run_check(repo: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate the current repository.")
     parser.add_argument("--repo", type=Path, default=None, help="Repository root (auto-detected).")
+    parser.add_argument(
+        "--no-firstmate",
+        action="store_true",
+        help="Skip firstmate doctor/build even if firstmate is installed.",
+    )
+    parser.add_argument(
+        "--no-no-mistakes",
+        action="store_true",
+        help="Skip no-mistakes check even if no-mistakes is installed.",
+    )
     args = parser.parse_args(argv)
     repo = (args.repo or find_repo_root()).resolve()
     info(f"checking {repo}")
-    return run_check(repo)
+    return run_check(
+        repo,
+        with_firstmate=not args.no_firstmate,
+        with_no_mistakes=not args.no_no_mistakes,
+    )
 
 
 if __name__ == "__main__":

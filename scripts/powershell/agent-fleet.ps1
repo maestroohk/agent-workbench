@@ -1,7 +1,21 @@
-# agent-workbench: scan the current repository.
+# agent-workbench: spawn N Claude agents in parallel, each in an isolated context.
 [CmdletBinding()]
 param(
-    [string]$Repo
+    [Parameter(Mandatory = $true, Position = 0)]
+    [int]$Count,
+    [string]$Repo,
+    [ValidateSet('code', 'review', 'architecture', 'documentation', 'general')]
+    [string]$Task = 'general',
+    [string]$Model,
+    [ValidateSet('auto', 'herdr', 'treehouse', 'none')]
+    [string]$Backend = 'auto',
+    [ValidateSet('auto', 'yes', 'no')]
+    [string]$Worktree = 'auto',
+    [switch]$Wait,
+    [int]$Timeout = 600000,
+    [switch]$Json,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,8 +62,16 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('scan')
+$forward = @('fleet', $Count)
 if ($Repo) { $forward += @('--repo', $Repo) }
+$forward += @('--task', $Task)
+if ($Model) { $forward += @('--model', $Model) }
+$forward += @('--backend', $Backend)
+$forward += @('--worktree', $Worktree)
+if ($Wait) { $forward += '--wait' }
+$forward += @('--timeout', $Timeout)
+if ($Json) { $forward += '--json' }
+if ($Rest) { $forward += $Rest }
 
 & $python (Join-Path $PythonDir 'dispatch.py') @forward
 exit $LASTEXITCODE

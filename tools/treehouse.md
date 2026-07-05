@@ -1,57 +1,87 @@
 # treehouse
 
-A project-isolated development environment manager. Spawns shell sessions, Docker containers, or remote workspaces per project, with consistent environment variables and tooling.
+A pool of reusable git worktrees that AI agents (or humans) can lease
+instantly, without cloning. Per-project checkout takes a few hundred
+milliseconds; the worktree is preserved in the pool with the build
+cache and dependencies intact. Written by the same author as
+`firstmate` and `no-mistakes`.
 
 ## Purpose
 
-- One shell, one environment, one project. No more `source .envrc` rituals.
-- Reproducible dev environments: a `treehouse.toml` declares what the project needs (language version, env vars, services, ports).
-- Switch between projects without leaking environment state.
+- Drop into a clean worktree in one command, do work, exit. The
+  worktree returns to the pool.
+- Reusable worktrees — dependencies and build cache are kept warm.
+- Detached HEAD mode by default, so concurrent agents on the same
+  branch do not collide.
+- In-use detection — treehouse scans running processes so two agents
+  cannot grab the same worktree.
+- Durable leases: `treehouse get --lease` reserves a worktree without
+  opening a subshell.
+- Safe pruning: dry-run by default; requires `--yes` to delete.
 
 ## Where it provides value in an AI workflow
 
-- The agent is invoked in a shell. If the shell is in the wrong environment, the agent gets the wrong toolchain. `treehouse` guarantees the agent sees the same environment the developer does.
-- Useful for projects with several services (Postgres + Redis + a backend). `treehouse up` brings the whole stack up; the agent can then reason about a running system rather than a cold one.
+- The workbench's `agent-fleet` uses treehouse (when herdr is
+  unavailable) to lease N worktrees in parallel, one per agent.
+- AI agents in parallel can each have a clean, isolated worktree
+  without each agent paying the full checkout / build cost.
 
 ## Installation
 
-- macOS / Linux: `curl -sSf https://treehouse.dev/install.sh | sh`
-- Windows: install via WSL. Treehouse targets Unix-style shells.
+- macOS / Linux: `curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh`
+- Windows (PowerShell): `irm https://kunchenguid.github.io/treehouse/install.ps1 | iex`
+- Nix: `nix run github:kunchenguid/treehouse`
+- `go install github.com/kunchenguid/treehouse@latest`
+- From source: `git clone` + `make install`
+
+Verify with `treehouse --version`.
 
 ## Recommended usage
 
-- Run `treehouse init` in a new project to generate `treehouse.toml`.
-- Use `treehouse enter` to start a session in the project's environment. Run `agent-scan` and `agent-claude` from inside that session.
-- Use `treehouse up` for projects with Docker Compose dependencies.
+- `treehouse get` — drop into a subshell in a fresh worktree. Exiting
+  returns the worktree to the pool.
+- `treehouse get --lease` — reserve a worktree without a subshell
+  (used by `agent-fleet`).
+- `treehouse list` — enumerate worktrees in the pool.
+- `treehouse prune` — garbage-collect unused worktrees (dry-run by
+  default; `--yes` to commit).
 
-A minimal `treehouse.toml`:
+A minimal flow:
 
-```toml
-[project]
-name = "my-api"
-runtime = "python@3.12"
-
-[env]
-DATABASE_URL = "postgres://localhost/myapi"
-
-[services.postgres]
-image = "postgres:16"
-port = 5432
+```bash
+$ treehouse get
+(worktree: ~/treehouse/pool/abc123) $ git status
+HEAD detached at origin/main
+$ exit
+# worktree returned to the pool, build cache preserved
 ```
 
 ## Best practices
 
-- Commit `treehouse.toml` to the repository. It is the contract between the project and the developer's environment.
-- Keep the file small. If it grows past 50 lines, the project's environment may be doing too much.
-- Pair with `direnv` if your team has contributors who do not use treehouse.
+- Use detached HEAD mode unless the user explicitly needs a branch.
+- Lease (`--lease`) when an external process will manage the worktree;
+  only the subshell form opens an interactive shell.
+- Prune periodically; the pool can grow without bound.
 
 ## Integration with `agent-workbench`
 
-- Run `agent-claude` from inside `treehouse enter`. The agent will see the right Python version, env vars, and services.
-- Useful for WSL / Docker development where the host and the agent might otherwise disagree on which toolchain is current.
+- `agent-fleet` uses treehouse as the fallback multi-agent backend
+  when herdr is not available.
+- The lease is short-lived: agents that finish within the timeout are
+  reaped automatically; agents that exceed the timeout can be
+  recovered manually with `treehouse list` + `treehouse prune`.
 
 ## Limitations
 
-- Single-developer ergonomics. For team-wide environment enforcement, prefer Nix or devcontainers.
-- Windows requires WSL.
-- The ecosystem is younger than Nix or asdf; if you depend on exotic runtimes, evaluate first.
+- Local-only state. Worktrees are not shared between machines.
+- Detached HEAD means no automatic upstream tracking; if you need
+  branches, pass `--branch` explicitly.
+- Windows support is via the same `install.ps1` flow as the other
+  kunchenguid tools; native installer is the same path.
+
+## References
+
+- Source: <https://github.com/kunchenguid/treehouse> (MIT, 740 stars)
+- Releases: 20 releases; latest `v2.0.0` (Jun 2026)
+- Companion tools by the same author: `firstmate`, `no-mistakes`,
+  `gnhf`

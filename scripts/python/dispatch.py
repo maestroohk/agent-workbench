@@ -28,6 +28,8 @@ COMMANDS = {
     "review": "build_prompt",
     "test": "agent_test",
     "claude": "agent_claude",
+    "bootstrap": "bootstrap",
+    "fleet": "agent_fleet",
 }
 
 

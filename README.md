@@ -72,21 +72,33 @@ After installation, the following commands are available on `PATH`:
 
 | Command         | Purpose                                                   |
 | --------------- | --------------------------------------------------------- |
-| `agent-init`    | Install or update the toolkit                             |
+| `agent-init`    | Install or update the toolkit and its external dependencies |
+| `agent-bootstrap` | Install external dependencies (herdr, firstmate, no-mistakes, treehouse) on demand |
 | `agent-scan`    | Generate `.agent/` summaries for the current repository   |
-| `agent-check`   | Validate the repository (structure, missing files)        |
+| `agent-check`   | Validate the repository (structure, firstmate doctor, no-mistakes) |
 | `agent-review`  | Print a review-ready system prompt for the repo           |
-| `agent-test`    | Run the detected test suite, if any                       |
-| `agent-claude`  | Launch the model with the assembled system prompt         |
+| `agent-test`    | Run the detected test suite, or `firstmate test` if firstmate is installed |
+| `agent-claude`  | Launch Claude Code (or ollama) with the assembled system prompt |
+| `agent-fleet`   | Spawn N Claude agents in parallel, each in an isolated herdr pane and worktree |
 
 ### Typical flow
 
 ```bash
 cd ~/code/my-project
-agent-scan              # generates .agent/repo-summary.md, architecture.md, ...
-agent-check             # validates the repo is in a buildable state
-agent-review            # builds the system prompt and prints it
-agent-claude            # launches ollama with the prompt
+agent-init --bootstrap          # one-time: install herdr, firstmate, no-mistakes, treehouse
+agent-scan                      # generates .agent/repo-summary.md, architecture.md, ...
+agent-check                     # validates the repo is in a buildable state
+agent-review                    # builds the system prompt and prints it
+agent-claude                    # launches claude with the prompt
+```
+
+### Multi-agent flow
+
+```bash
+cd ~/code/my-project
+agent-fleet 3 --task code --wait   # spawns 3 agents in 3 herdr panes on 3 worktrees; waits
+agent-fleet 1 --backend herdr     # spawn a single isolated agent
+agent-fleet 2 --backend treehouse  # fall back to treehouse if herdr is unavailable
 ```
 
 ### Choosing a model
@@ -97,6 +109,30 @@ agent-claude            # launches ollama with the prompt
 2. `AGENT_MODEL` environment variable
 3. `agent-workbench/config.toml` in the install root
 4. Built-in default `minimax-m3:cloud`
+
+The runner (`claude`, `herdr agent start`, or `ollama run`) is picked
+automatically: `agent-claude --backend auto` prefers herdr (when
+installed) so the agent runs in an isolated pane.
+
+## Dependencies
+
+`agent-init` will optionally install the external tools the workbench
+is designed to orchestrate. By default, `--bootstrap` installs:
+
+| Tool | Why | Install source |
+| --- | --- | --- |
+| `herdr` | Agent multiplexer (default backend for `agent-fleet`) | `https://herdr.dev` |
+| `firstmate` | Per-project command orchestrator (`firstmate test` / `build` / `lint`) | `github.com/kunchenguid/firstmate` |
+| `no-mistakes` | Pre-push validation (`agent-check` invokes `no-mistakes check --all`) | `github.com/kunchenguid/no-mistakes` |
+| `treehouse` | Git worktree pool (fallback backend for `agent-fleet`) | `github.com/kunchenguid/treehouse` |
+
+Plus the model runtime: `claude` (Claude Code CLI) or `ollama` (local
+fallback), and the terminal: `wezterm` (fallback when herdr's mux is
+unwanted).
+
+Re-run with `--no-bootstrap` to skip, or `--bootstrap=herdr,firstmate`
+to scope. `agent-bootstrap` is also available as a standalone command
+with the same flags (`--check`, `--all`, `--no-curl`, `--json`).
 
 ## Project instructions
 
@@ -125,9 +161,19 @@ Drop any of these into the repository root and they will be picked up automatica
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-### `agent-claude` cannot find ollama
+### `agent-claude` cannot find a model runner
 
-Install Ollama from <https://ollama.com/download> and ensure `ollama --version` works in the same shell.
+The workbench looks for, in order: `claude` (Claude Code CLI), then
+`herdr agent start` (when herdr is installed), then `ollama run
+<model>`. Install one of:
+
+- `npm install -g @anthropic-ai/claude-code`
+- `irm https://herdr.dev/install.ps1 | iex` (Windows preview) or
+  `curl -fsSL https://herdr.dev/install.sh | sh` (macOS/Linux)
+- `winget install Ollama.Ollama` (Windows) or
+  `curl -fsSL https://ollama.com/install.sh | sh` (macOS/Linux)
+
+Or just run `agent-init --bootstrap=claude` to install the default.
 
 ### Symlink permission denied on Windows
 

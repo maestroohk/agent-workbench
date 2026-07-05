@@ -28,6 +28,8 @@ from utils import (
     workbench_root,
 )
 
+import bootstrap as _bootstrap
+
 
 HELPERS = [
     "agent-init",
@@ -36,6 +38,8 @@ HELPERS = [
     "agent-review",
     "agent-test",
     "agent-claude",
+    "agent-bootstrap",
+    "agent-fleet",
 ]
 
 
@@ -83,6 +87,14 @@ def _install_helpers(platform_name: str, *, force: bool) -> list[Path]:
                 target.chmod(0o755)
             info(f"copy: {target} <- {source}")
         installed.append(target)
+    # Write a marker file alongside the installed shims so the PowerShell
+    # wrappers can find the toolkit root when run from `~/.local/bin/`.
+    marker = target_dir / "agent-workbench-home"
+    try:
+        marker.write_text(str(wb), encoding="utf-8")
+        info(f"marker: {marker} -> {wb}")
+    except OSError as exc:
+        info(f"could not write marker {marker}: {exc}")
     return installed
 
 
@@ -106,6 +118,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install or update agent-workbench.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing helpers.")
     parser.add_argument("--print-platform", action="store_true", help="Print detected platform and exit.")
+    bootstrap_group = parser.add_mutually_exclusive_group()
+    bootstrap_group.add_argument(
+        "--bootstrap",
+        default=None,
+        metavar="LIST",
+        help="Comma-separated list of external tools to install after symlinking. "
+             "Default: herdr,firstmate,no-mistakes,treehouse. Pass 'all' for the full table.",
+    )
+    bootstrap_group.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="Skip the external-tool install step (only install the workbench's own helpers).",
+    )
+    parser.add_argument(
+        "--no-curl",
+        action="store_true",
+        help="Skip install methods that pipe a remote shell (winget/choco/brew/git only).",
+    )
     args = parser.parse_args(argv)
 
     platform_name = detect_platform()
@@ -118,6 +148,19 @@ def main(argv: list[str] | None = None) -> int:
     installed = _install_helpers(platform_name, force=args.force)
     _print_path_hint(platform_name)
     info(f"installed {len(installed)} helper(s)")
+
+    if not args.no_bootstrap:
+        if args.bootstrap is None:
+            targets: list[str] | None = None
+        elif args.bootstrap.strip().lower() == "all":
+            targets = list(_bootstrap.DEPENDENCIES)
+        else:
+            targets = [t.strip() for t in args.bootstrap.split(",") if t.strip()]
+        info(f"bootstrapping: {','.join(targets) if targets else '(defaults)'}")
+        statuses = _bootstrap.install_dependencies(targets, allow_curl=not args.no_curl)
+        missing = [s.name for s in statuses if not s.present]
+        if missing:
+            info(f"could not bootstrap: {', '.join(missing)} — re-run with --no-bootstrap to skip")
     return 0
 
 

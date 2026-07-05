@@ -1,59 +1,75 @@
 # lavish-axi
 
-A long-running, opinionated AI orchestration daemon. Listens to file-system events, runs project commands, and exposes a small HTTP API for other tools (including AI agents) to query and trigger workflows.
+A local-first HTML authoring tool designed for human + AI collaboration
+on HTML artifacts. "HTML is the new markdown; lavish is the new editor
+for your HTML artifacts." Written by the same author as `firstmate`,
+`no-mistakes`, and `treehouse`.
 
 ## Purpose
 
-- Project-level event bus. "When the `.cs` file changes, run `dotnet build`."
-- A daemon that holds state across invocations: project index, last build result, last test run, dependency graph.
-- An HTTP API other tools can hit. The agent does not need to know the project's command set; it asks the daemon.
+- Agents write the HTML artifact; humans annotate elements, text
+  ranges, or Mermaid nodes locally and send feedback back.
+- The artifact is the source of truth; the comment trail is the
+  review log.
+- Local-first, cross-platform (macOS, Linux, Windows), MIT-licensed.
 
 ## Where it provides value in an AI workflow
 
-- The agent gets a structured view of the project: what changed, what depends on what, what passed, what failed. It does not have to re-derive this every prompt.
-- Triggers: the daemon can run tests on save, then expose the result to the agent.
-- Long-lived context: build cache, test cache, file index, all warm.
+- An agent generates an HTML mockup, design doc, or schema diagram.
+- The human annotates specific elements and the agent reads the
+  annotations to revise.
+- Especially useful for Mermaid diagrams and inline screenshots where
+  conversational feedback is awkward.
 
 ## Installation
 
-- macOS / Linux: `curl -sSf https://lavish-axi.dev/install.sh | sh`
-- Windows: download the installer from <https://lavish-axi.dev/releases> or run under WSL.
-- Start: `lavish-axi start`. Stop: `lavish-axi stop`. Status: `lavish-axi status`.
+The primary install is via the `npx skills add` flow (no separate
+`npm install` required):
+
+```bash
+npx skills add kunchenguid/lavish-axi --skill lavish
+```
+
+Add `-g` to install globally. The skill teaches the agent to invoke
+lavish on demand via `npx -y lavish-axi`.
+
+Alternative: `npm install -g lavish-axi && lavish-axi setup hooks` to
+register the setup hook path with Claude Code, Codex, OpenCode, and
+GitHub Copilot CLI.
 
 ## Recommended usage
 
-- Run as a per-user background service: `lavish-axi start --user`.
-- Add a `lavish-axi.toml` to the project to declare triggers:
-
-```toml
-[project]
-name = "my-api"
-
-[triggers.on-save]
-paths = ["src/**/*.cs"]
-run = "dotnet build"
-
-[triggers.on-test]
-run = "dotnet test"
-report = "http://localhost:7474/results"
-```
-
-- Query: `curl http://localhost:7474/project/my-api/status | jq`.
+- Ask the agent to produce an HTML artifact (a diagram, a design doc,
+  a screenshot mockup).
+- The agent runs `lavish-axi annotate <file>` to open a local
+  annotation UI.
+- You click on elements, leave comments, save.
+- The agent reads the annotations and revises.
 
 ## Best practices
 
-- Treat the daemon's index as a cache. It is allowed to be wrong, briefly. Rebuild on corruption.
-- Keep the trigger set small. A trigger that fires on every keystroke is a trigger that wastes the developer's time.
-- Expose the daemon only on localhost unless you have a reason to do otherwise. It has project knowledge.
+- Use lavish for artifacts you will iterate on (design docs, mockups,
+  diagram families). For one-off HTML, plain markdown is fine.
+- Keep the artifacts in version control; lavish stores annotations
+  alongside the HTML.
 
 ## Integration with `agent-workbench`
 
-- `agent-claude` can query `lavish-axi` for project status before generating a system prompt. The prompt will include "what just changed" and "what just failed" without the agent re-running anything.
-- `agent-test` can defer to the daemon's last-known test result if it is recent enough.
+- `agent-init --bootstrap=lavish-axi` runs the `npx skills add` step.
+- The workbench does not auto-invoke lavish-axi; the agent itself
+  decides when annotation is appropriate.
 
 ## Limitations
 
-- Adds another long-running process to the developer's machine. Memory and CPU are real.
-- The protocol is young; integrations are not yet a given.
-- On Windows, WSL is the path of least resistance. Native support exists but lags.
-- Do not expose the daemon to the network. It is not designed for it.
+- Adds a Node.js + browser dependency.
+- Annotations are local-first; sharing them requires the file to be
+  committed.
+- The skill model assumes the agent harness supports the
+  `npx skills add` flow (Claude Code, Codex, OpenCode, Copilot CLI
+  do).
+
+## References
+
+- Source: <https://github.com/kunchenguid/lavish-axi> (MIT, 1.6k stars)
+- Latest: `v0.1.36` (Jul 2026)
+- Companion tools: `firstmate`, `no-mistakes`, `treehouse`, `gnhf`

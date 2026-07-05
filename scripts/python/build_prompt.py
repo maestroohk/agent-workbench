@@ -66,11 +66,32 @@ def collect_project_instructions(repo: Path) -> list[Path]:
     return found
 
 
+# Files in `.agent/` that this module (and `agent_claude` /
+# `agent_fleet`) produce and which must never be loaded back into a
+# future prompt assembly. Including them would embed every previous
+# prompt into every new prompt — a quadratic blow-up.
+_SELF_PRODUCED_NAMES = {
+    "SYSTEM_PROMPT.md",
+    "SYSTEM_PROMPT.fleet.md",
+    "fleet-index.txt",
+}
+_SELF_PRODUCED_GLOBS = ("SYSTEM_PROMPT.fleet-*.md",)
+
+
+def _is_self_produced(path: Path) -> bool:
+    if path.name in _SELF_PRODUCED_NAMES:
+        return True
+    return any(path.match(g) for g in _SELF_PRODUCED_GLOBS)
+
+
 def collect_agent_summaries(repo: Path) -> list[Path]:
     out_dir = repo / AGENT_DIR_NAME
     if not out_dir.is_dir():
         return []
-    return sorted(p for p in out_dir.glob("*.md") if p.is_file())
+    return sorted(
+        p for p in out_dir.glob("*.md")
+        if p.is_file() and not _is_self_produced(p)
+    )
 
 
 def assemble_prompt(

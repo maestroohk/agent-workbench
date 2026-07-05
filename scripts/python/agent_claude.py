@@ -1,16 +1,25 @@
 """Implementation of the `agent-claude` launcher.
 
-Builds the system prompt and prepares it for `ollama launch claude`. The
-behaviour depends on the flags:
+Builds the system prompt and prepares it for the model runner. Behaviour:
 
-- With `--show-prompt`, prints the assembled prompt to stdout and exits.
-- Without it, writes the prompt to `<repo>/.agent/SYSTEM_PROMPT.md` and then
-  runs `ollama launch claude` from the repository root. Claude Code is
-  expected to read its system instructions from `.agent/SYSTEM_PROMPT.md`
-  (or you can copy-paste the prompt from the printed summary).
+- `--show-prompt` prints the assembled prompt and exits.
+- `--write-only` writes the prompt to `<repo>/.agent/SYSTEM_PROMPT.md` and exits.
+- Default: writes the prompt, then launches the model runner.
+
+Runner selection (in order of preference):
+1. The `claude` CLI (Anthropic Claude Code). Reads the system prompt from
+   `<repo>/.agent/SYSTEM_PROMPT.md` (Claude Code's default location).
+2. `herdr agent start <name> -- <argv…>` — launches `claude` in an isolated
+   herdr pane on a fresh worktree. Used when `--backend=herdr`.
+3. `ollama run <model>` — local model fallback when `claude` is not installed.
+4. Print a paste-ready summary if no runner is found.
 
 The default model is `minimax-m3:cloud`; override with `--model`,
 `AGENT_MODEL`, or the `~/.agent-workbench/config.toml` file.
+
+If herdr is present, `agent-claude` is also the place we wire the
+`herdr integration install claude` step (one-time setup that registers
+herdr's agent-state hook with Claude Code).
 """
 from __future__ import annotations
 
@@ -63,23 +72,89 @@ def write_prompt_to_repo(repo: Path, prompt: str) -> Path:
     return out
 
 
-def launch_with_ollama(prompt_path: Path, model: str, repo: Path) -> int:
-    """Invoke `ollama launch claude` from the repository root.
+def _herdr_available() -> bool:
+    return first_executable(["herdr"]) is not None
 
-    The system prompt is already on disk at `prompt_path`. Claude Code is
-    expected to read `.agent/SYSTEM_PROMPT.md` for system instructions.
+
+def _ensure_herdr_claude_integration() -> bool:
+    """Run `herdr integration install claude` if herdr is present and the hook isn't yet installed.
+
+    This is a one-time, idempotent setup step: herdr prints "installed claude integration hook"
+    the first time and is a no-op afterwards.
     """
+    if not _herdr_available():
+        return False
+    hook_path = Path.home() / ".claude" / "hooks" / "herdr-agent-state.ps1"
+    if hook_path.is_file():
+        return True
+    info("installing herdr claude integration hook …")
+    result = run_command(["herdr", "integration", "install", "claude"])
+    if result.returncode != 0:
+        info(f"herdr integration install claude failed: {result.stderr.strip()[:200]}")
+        return False
+    return True
+
+
+def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: str = "primary") -> int:
+    """Launch `claude` in a new herdr agent on a fresh worktree.
+
+    Returns the herdr invocation's returncode. The herdr server keeps the
+    process alive after we return; the user can attach with
+    `herdr agent attach <name>` or `herdr agent wait <name> --status done`.
+    """
+    if not _ensure_herdr_claude_integration():
+        info("herdr unavailable or integration hook failed; falling back")
+        return _spawn_claude(repo, model)
+    info(f"spawning herdr agent: {agent_name}")
+    worktree_args = ["herdr", "worktree", "create", "--label", f"agent-{agent_name}", "--no-focus", "--json"]
+    wt_result = run_command(worktree_args, cwd=repo)
+    if wt_result.returncode != 0:
+        info(f"herdr worktree create failed: {wt_result.stderr.strip()[:200]}")
+        return _spawn_claude(repo, model)
+    worktree_path = wt_result.stdout.strip() or str(repo)
+    info(f"worktree: {worktree_path}")
+    cmd = [
+        "herdr",
+        "agent",
+        "start",
+        agent_name,
+        "--cwd",
+        worktree_path,
+        "--tab",
+        "new",
+        "--no-focus",
+        "--",
+        "claude",
+        "--append-system-prompt",
+        f"$(cat {prompt_path})",
+    ]
+    info(f"running: {' '.join(cmd)}")
+    result = run_command(cmd, cwd=repo)
+    return result.returncode
+
+
+def _spawn_claude(repo: Path, model: str) -> int:
+    """Launch the `claude` CLI in the current repo (no herdr isolation)."""
+    claude = first_executable(["claude"])
+    if not claude:
+        info("claude CLI not found on PATH; falling back to ollama run")
+        return _spawn_ollama(repo, model)
+    info(f"running: {claude} (cwd={repo})")
+    result = run_command([claude], cwd=repo)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def _spawn_ollama(repo: Path, model: str) -> int:
+    """Fall back to ollama run <model> when no other runner is available."""
     ollama = first_executable(["ollama"])
     if not ollama:
-        print("ollama executable not found on PATH", file=sys.stderr)
-        print("install from https://ollama.com/download", file=sys.stderr)
+        print("no model runner found", file=sys.stderr)
+        print("install the claude CLI (npm i -g @anthropic-ai/claude-code) or ollama (winget install Ollama.Ollama)", file=sys.stderr)
         return 127
-    info(f"system prompt: {prompt_path}")
-    info(f"model: {model}")
-    info(f"repo: {repo}")
-    cmd = [ollama, "launch", "claude"]
-    info(f"running: {' '.join(cmd)} (cwd={repo})")
-    result = run_command(cmd, cwd=repo)
+    info(f"running: {ollama} run {model} (cwd={repo})")
+    result = run_command([ollama, "run", model], cwd=repo)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     return result.returncode
@@ -110,6 +185,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Write the system prompt to .agent/SYSTEM_PROMPT.md and exit.",
     )
     parser.add_argument(
+        "--backend",
+        choices=("auto", "herdr", "claude", "ollama", "none"),
+        default="auto",
+        help="Which model runner to use. auto=prefer herdr if available, else claude, else ollama. none=print the prompt and stop.",
+    )
+    parser.add_argument(
+        "--worktree",
+        choices=("auto", "yes", "no"),
+        default="auto",
+        help="With --backend=herdr: spawn the agent on a fresh worktree (yes) or in the current checkout (no).",
+    )
+    parser.add_argument(
         "task_text",
         nargs="?",
         default="",
@@ -130,8 +217,27 @@ def main(argv: list[str] | None = None) -> int:
     info(f"wrote {prompt_path}")
     if args.write_only:
         return 0
+    if args.backend == "none":
+        info("backend=none; prompt written but not run")
+        return 0
     model = resolve_model(args.model)
-    return launch_with_ollama(prompt_path, model, repo)
+    info(f"model: {model}")
+
+    backend = args.backend
+    if backend == "auto":
+        backend = "herdr" if _herdr_available() and first_executable(["claude"]) else ("claude" if first_executable(["claude"]) else "ollama")
+        info(f"auto-selected backend: {backend}")
+
+    if backend == "herdr":
+        use_worktree = args.worktree == "yes" or (args.worktree == "auto" and _herdr_available())
+        if use_worktree:
+            return _spawn_herdr_agent(repo, prompt_path, model)
+        return _spawn_claude(repo, model)
+    if backend == "claude":
+        return _spawn_claude(repo, model)
+    if backend == "ollama":
+        return _spawn_ollama(repo, model)
+    return 1
 
 
 if __name__ == "__main__":
