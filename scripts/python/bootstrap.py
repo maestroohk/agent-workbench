@@ -67,18 +67,16 @@ DEPENDENCIES: dict[str, dict] = {
         "probe": "no-mistakes",
         "purpose": "Git proxy that pre-validates with review/test/docs/lint before pushing.",
         "install": [
-            {"windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1 | iex"]},
-            {"darwin": ["sh", "-c", "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh"]},
-            {"linux": ["sh", "-c", "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh"]},
+            # Real install: download the latest release asset from GitHub
+            # and extract the binary into ~/.local/bin/.
+            {"any": ["_github_release", "kunchenguid/no-mistakes", "no-mistakes"]},
         ],
     },
     "treehouse": {
         "probe": "treehouse",
         "purpose": "Git worktree pool — gives agent-fleet N isolated worktrees fast.",
         "install": [
-            {"windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://kunchenguid.github.io/treehouse/install.ps1 | iex"]},
-            {"darwin": ["sh", "-c", "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh"]},
-            {"linux": ["sh", "-c", "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh"]},
+            {"any": ["_github_release", "kunchenguid/treehouse", "treehouse"]},
         ],
     },
     "gnhf": {
@@ -230,8 +228,19 @@ def _run_method(method_args: list[str], *, timeout: int = _DEFAULT_INSTALL_TIMEO
     - Non-zero exit from the installer script — already handled via returncode.
     - The first argv element being a bare `powershell` on Windows — we
       resolve it to a full path so `CreateProcess` never has to guess.
+    - The first element being a sentinel like `"_github_release"` — we
+      handle it in-process by downloading the latest release binary.
     """
     expanded = [os.path.expandvars(a) for a in method_args]
+    # Sentinel: download the latest release binary from GitHub and place
+    # it in ~/.local/bin. Used for no-mistakes and treehouse (both
+    # publish release zips/tarballs on GitHub Releases).
+    if expanded and expanded[0] == "_github_release":
+        if len(expanded) < 3:
+            return False, "_github_release needs <repo> <binary_name>"
+        repo = expanded[1]
+        binary_name = expanded[2]
+        return _install_from_github_release(repo, binary_name, timeout=timeout)
     # On Windows, prefer pwsh over powershell and resolve to a full path
     # so the subprocess can always find the interpreter.
     if expanded and expanded[0].lower() in ("powershell", "powershell.exe", "pwsh", "pwsh.exe"):
@@ -251,6 +260,132 @@ def _run_method(method_args: list[str], *, timeout: int = _DEFAULT_INSTALL_TIMEO
         return False, f"OSError: {exc}"
     combined = ((result.stdout or "") + (result.stderr or "")).strip()
     return result.returncode == 0, combined[:500]
+
+
+# --- GitHub release install ----------------------------------------------
+
+def _detect_platform_asset_suffix() -> tuple[str, str, str]:
+    """Return (asset_os, asset_arch, archive_ext) for picking a release asset.
+
+    Maps the workbench's platform names to the suffixes used by the
+    kunchenguid release pipeline. e.g. on a Windows x86_64 box this
+    returns ('windows', 'amd64', 'zip'); on Linux arm64 it's
+    ('linux', 'arm64', 'tar.gz').
+    """
+    sysname = sys.platform
+    machine = (os.environ.get("PROCESSOR_ARCHITECTURE") or "").lower()
+    if sysname.startswith("win"):
+        os_part = "windows"
+        ext = "zip"
+    elif sysname == "darwin":
+        os_part = "darwin"
+        ext = "tar.gz"
+    else:
+        os_part = "linux"
+        ext = "tar.gz"
+    if machine in ("amd64", "x86_64", "x64"):
+        arch = "amd64"
+    elif machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    else:
+        arch = machine or "amd64"
+    return os_part, arch, ext
+
+
+def _install_from_github_release(repo: str, binary_name: str, *, timeout: int = _DEFAULT_INSTALL_TIMEOUT) -> tuple[bool, str]:
+    """Download the latest release binary for `repo` and place it in ~/.local/bin.
+
+    Picks the right asset for the current platform/arch, downloads it to
+    a temp file, extracts the binary, and writes it to
+    `<AGENT_BIN_DIR>/<binary_name>[.exe]`. The asset name convention is
+    `<binary_name>-<version>-<os>-<arch>.<ext>` (matching the
+    kunchenguid release pipeline for no-mistakes and treehouse).
+    """
+    # AGENT_BIN_DIR is defined in utils; import here to avoid a circular
+    # import at module load (utils imports nothing from bootstrap).
+    from utils import AGENT_BIN_DIR
+
+    os_part, arch, ext = _detect_platform_asset_suffix()
+    info(f"{binary_name}: resolving latest release for {repo} on {os_part}/{arch}")
+
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    try:
+        import urllib.request
+        req = urllib.request.Request(api_url, headers={"User-Agent": "agent-workbench-bootstrap"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            release = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 — network/GitHub can fail in many ways
+        return False, f"failed to query {api_url}: {exc}"
+
+    tag = release.get("tag_name") or "v0.0.0"
+    # Asset name pattern (kunchenguid release pipeline):
+    #   <binary_name>-<tag>-<os>-<arch>.<ext>
+    # e.g. no-mistakes-v1.31.2-windows-amd64.zip
+    #      treehouse-v2.0.0-darwin-arm64.tar.gz
+    asset_name = f"{binary_name}-{tag}-{os_part}-{arch}.{ext}"
+    download_url = None
+    for asset in release.get("assets", []):
+        if asset.get("name") == asset_name:
+            download_url = asset.get("browser_download_url")
+            break
+    if not download_url:
+        # Fallback: tag without leading "v".
+        bare = f"{binary_name}-{tag.lstrip('v')}-{os_part}-{arch}.{ext}"
+        for asset in release.get("assets", []):
+            if asset.get("name") == bare:
+                download_url = asset.get("browser_download_url")
+                asset_name = bare
+                break
+    if not download_url:
+        names = [a.get("name") for a in release.get("assets", [])]
+        return False, f"no asset matching {asset_name} in {repo}@{tag} (have: {names[:6]})"
+
+    info(f"{binary_name}: downloading {asset_name}")
+    try:
+        import tempfile, zipfile, tarfile
+        with urllib.request.urlopen(download_url, timeout=timeout) as resp:
+            data = resp.read()
+    except Exception as exc:
+        return False, f"download failed: {download_url}: {exc}"
+
+    AGENT_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    binary_path = AGENT_BIN_DIR / (binary_name + (".exe" if os_part == "windows" else ""))
+    try:
+        with tempfile.NamedTemporaryFile(suffix="." + ext, delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
+        if ext == "zip":
+            with zipfile.ZipFile(tmp_path, "r") as zf:
+                member = None
+                for name in zf.namelist():
+                    base = name.rsplit("/", 1)[-1]
+                    if base == binary_name + ".exe" or base == binary_name:
+                        member = name
+                        break
+                if member is None:
+                    return False, f"no {binary_name} inside the zip (members: {zf.namelist()[:6]})"
+                with zf.open(member) as src, binary_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        else:
+            with tarfile.open(tmp_path, "r:gz") as tf:
+                member = None
+                for tarinfo in tf.getmembers():
+                    base = tarinfo.name.rsplit("/", 1)[-1]
+                    if base == binary_name:
+                        member = tarinfo
+                        break
+                if member is None:
+                    return False, f"no {binary_name} inside the tarball"
+                with tf.extractfile(member) as src, binary_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        tmp_path.unlink(missing_ok=True)
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        return False, f"extract failed: {exc}"
+
+    if os_part != "windows":
+        binary_path.chmod(0o755)
+    info(f"{binary_name}: installed at {binary_path}")
+    return True, f"installed {binary_name} {tag} from {repo}@{tag}"
 
 
 def install_dependency(name: str, *, platform_name: Optional[str] = None) -> DependencyStatus:

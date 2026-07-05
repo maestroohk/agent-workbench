@@ -41,6 +41,7 @@ HELPERS = [
     "agent-bootstrap",
     "agent-fleet",
     "agent-go",
+    "agent-overnight",
 ]
 
 

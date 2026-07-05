@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Real install for no-mistakes and treehouse**: replaced the
+  fictional `irm ... | iex` URLs in `bootstrap.py` with a
+  `_install_from_github_release` helper that downloads the latest
+  release asset from the kunchenguid GitHub repos, extracts the
+  binary, and places it in `~/.local/bin/`. Verified end-to-end on
+  Windows: `no-mistakes v1.31.2` and `treehouse v2.0.0` both install
+  and run.
+- **`agent-overnight`** — gnhf wrapper with safe defaults. Adds
+  `--worktree` (isolated branch), `--max-iterations 50`,
+  `--max-tokens 100000`, and a preflight check that refuses to run
+  on a dirty repo. Supports `--task-file <path>` so the prompt can
+  live in version control. Dry-run mode shows the exact gnhf command
+  that would be run. Wired into the dispatcher, the bash and
+  PowerShell shims, and the installer's `HELPERS` list.
+- **`tools/kunchenguid.md`** — documents how the three kunchenguid
+  companion tools (no-mistakes, treehouse, gnhf) integrate with
+  the workbench, the typical flows, and what the workbench does
+  NOT auto-do for you.
+- **`agent-fleet` treehouse backend verified end-to-end**: the
+  earlier `treehouse get --lease --label` call used the wrong flag
+  (the real one is `--lease-holder`); fixed and verified: a 2-agent
+  fleet leases 2 worktrees from the pool and the JSON report
+  contains the right paths.
 - **`agent-go`** — the one-liner cold-machine bootstrap. Paste
   `iex (irm …/install.ps1)` on a fresh Windows box, or
   `curl -fsSL …/install.sh | sh` on macOS/Linux/WSL, and you end up
@@ -72,6 +95,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent-fleet` so `agent-init` installs the full set of 8 helpers.
 
 ### Fixed
+- **`agent-check` no-mistakes invocation**: was calling the
+  non-existent `no-mistakes check --all` subcommand. Replaced with
+  the real `no-mistakes doctor` (system health) and `no-mistakes
+  status` (current run, only when the gate is initialized). Doctor
+  output is now surfaced as `[ok]/[warn]/[info]` lines in
+  `agent-check`.
+- **`agent-fleet` treehouse lease flag**: was passing
+  `--label agent-<name>` to `treehouse get --lease`; the real flag
+  is `--lease-holder`. Fixed and verified.
+- **`agent-claude` and `agent-fleet` no longer shell out to `cat`**:
+  the herdr backend's `claude --append-system-prompt "@$(cat
+  <file>)"` worked on bash but failed on Windows (and even in bash
+  on Windows, `cat` isn't on PATH inside the herdr spawn). Reads
+  the prompt into a Python string and passes it directly.
 - **`agent-claude` herdr backend no longer uses `$(cat <file>)`** to
   pass the system prompt to `claude` (that breaks on Windows where
   `cat` is not on PATH inside the herdr spawn). It now reads the

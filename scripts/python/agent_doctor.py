@@ -78,11 +78,35 @@ def run_build(repo: Path) -> tuple[int, str]:
     return result.returncode, result.combined()
 
 
-def run_no_mistakes_check(repo: Path) -> tuple[int, str]:
-    """Run `no-mistakes check --all` in the repo. Returns (returncode, combined-output)."""
+def run_no_mistakes_doctor(repo: Path) -> tuple[int, str]:
+    """Run `no-mistakes doctor` in the repo. Returns (returncode, combined-output).
+
+    `no-mistakes` doesn't have a `check` subcommand — its surface is
+    `init` (setup the gate), `doctor` (system health), `status` (current
+    run), and `axiom` (agent-facing TOON). For an `agent-check` we run
+    `doctor` because it always works regardless of whether the repo has
+    been initialized as a gate.
+    """
     nm = first_executable(["no-mistakes"])
     if not nm:
         return 127, "no-mistakes not installed (run `agent-init --bootstrap=no-mistakes`)"
-    info("no-mistakes check …")
-    result = run_command([nm, "check", "--all"], cwd=repo, timeout=300)
+    info("no-mistakes doctor …")
+    result = run_command([nm, "doctor"], cwd=repo, timeout=60)
+    return result.returncode, result.combined()
+
+
+def run_no_mistakes_status(repo: Path) -> tuple[int, str]:
+    """Run `no-mistakes status` in the repo. Returns (returncode, combined-output).
+
+    Only meaningful after `no-mistakes init` has been run in the repo
+    (which sets up the gate). Returns rc=127 with a clear message
+    otherwise so the caller can skip silently.
+    """
+    nm = first_executable(["no-mistakes"])
+    if not nm:
+        return 127, "no-mistakes not installed"
+    result = run_command([nm, "status"], cwd=repo, timeout=30)
+    # rc != 0 with "not initialized" message means the gate isn't set up.
+    if result.returncode != 0 and "not initialized" in (result.stderr or "").lower():
+        return 127, "no-mistakes gate not initialized in this repo (run `no-mistakes init`)"
     return result.returncode, result.combined()

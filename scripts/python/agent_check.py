@@ -79,16 +79,32 @@ def _check_firstmate_build(repo: Path, findings: list[tuple[str, str]]) -> None:
 
 
 def _check_no_mistakes(repo: Path, findings: list[tuple[str, str]]) -> None:
-    rc, output = agent_doctor.run_no_mistakes_check(repo)
+    """Surface no-mistakes health and (if initialized) current-run status.
+
+    We call `no-mistakes doctor` first (always available) and then
+    `no-mistakes status` (only meaningful after `no-mistakes init`).
+    The status call returns 127 with a clear message when the gate
+    isn't set up; we swallow that and surface only the doctor output.
+    """
+    rc, output = agent_doctor.run_no_mistakes_doctor(repo)
     if rc == 127:
         return  # not installed, no message
     if rc != 0:
-        findings.append(("err", f"no-mistakes check failed (rc={rc})"))
+        findings.append(("warn", f"no-mistakes doctor reported issues (rc={rc})"))
     else:
-        findings.append(("ok", "no-mistakes check passed"))
+        findings.append(("ok", "no-mistakes doctor passed"))
     for line in output.splitlines()[:20]:
         if line.strip():
             findings.append(("info", f"no-mistakes: {line.strip()[:120]}"))
+
+    # Optional: surface the current-run status if the gate is initialized.
+    rc, output = agent_doctor.run_no_mistakes_status(repo)
+    if rc == 127:
+        return
+    if rc != 0:
+        findings.append(("info", f"no-mistakes status (rc={rc})"))
+    else:
+        findings.append(("ok", "no-mistakes status: gate active"))
 
 
 def run_check(repo: Path, *, with_firstmate: bool = True, with_no_mistakes: bool = True) -> int:

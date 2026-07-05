@@ -9,6 +9,9 @@ venv/
 # Per-repo generated agent summaries
 .agent/
 
+# Treehouse per-repo config (created by `treehouse init`; per-repo state, not part of the workbench)
+treehouse.toml
+
 # Editor
 .vscode/
 .idea/

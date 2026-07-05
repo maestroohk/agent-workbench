@@ -31,6 +31,7 @@ COMMANDS = {
     "bootstrap": "bootstrap",
     "fleet": "agent_fleet",
     "go": "agent_go",
+    "overnight": "agent_overnight",
 }
 
 

@@ -79,11 +79,12 @@ After installation, the following commands are available on `PATH`:
 | `agent-go`      | One-liner cold-machine bootstrap: install missing tools, start herdr, run claude with the global rules pre-applied |
 | `agent-bootstrap` | Install external dependencies (herdr, firstmate, no-mistakes, treehouse) on demand |
 | `agent-scan`    | Generate `.agent/` summaries for the current repository   |
-| `agent-check`   | Validate the repository (structure, firstmate doctor, no-mistakes) |
+| `agent-check`   | Validate the repository (structure, firstmate doctor, no-mistakes doctor) |
 | `agent-review`  | Print a review-ready system prompt for the repo           |
 | `agent-test`    | Run the detected test suite, or `firstmate test` if firstmate is installed |
 | `agent-claude`  | Launch Claude Code (or ollama) with the assembled system prompt |
 | `agent-fleet`   | Spawn N Claude agents in parallel, each in an isolated herdr pane and worktree |
+| `agent-overnight` | Run a `gnhf` overnight loop with safe defaults (worktree, iteration + token caps, dirty-repo preflight) |
 
 ### Cold-machine flow (one line)
 
@@ -135,10 +136,29 @@ agent-claude                    # launches claude with the prompt
 
 ```bash
 cd ~/code/my-project
-agent-fleet 3 --task code --wait   # spawns 3 agents in 3 herdr panes on 3 worktrees; waits
-agent-fleet 1 --backend herdr     # spawn a single isolated agent
-agent-fleet 2 --backend treehouse  # fall back to treehouse if herdr is unavailable
+agent-fleet 3 --task code --wait                  # herdr backend (default): 3 panes, 3 worktrees
+agent-fleet 3 --task code --backend treehouse     # treehouse backend: leased worktrees from the pool
+agent-fleet 3 --task code --backend none          # no isolation; prompts only
 ```
+
+The three backends:
+
+- **`herdr` (default)** — uses `herdr worktree create` + `herdr agent start`. Best when you want each agent in its own terminal pane, attached to a live session.
+- **`treehouse`** — uses `treehouse get --lease` to lease N pre-warmed worktrees from the pool. Best when you want cheap, reusable isolation; the worktrees return to the pool when the agent exits.
+- **`none`** — writes N per-agent prompts to `.agent/SYSTEM_PROMPT.fleet-N.md` and tries to spawn N `claude` processes in the same checkout. Use only for testing; agents will collide on the working tree.
+
+### Overnight flow
+
+```bash
+cd ~/code/my-project
+echo "Fix all typecheck warnings in src/" > overnight-task.md
+agent-overnight --task-file overnight-task.md
+```
+
+`agent-overnight` wraps `gnhf` with safe defaults: `--worktree` (isolated
+branch), `--max-iterations 50`, `--max-tokens 100000`, and a preflight
+check that refuses to run on a dirty repo. By morning, the
+`gnhf/<slug>` branch has up to 50 commits, each addressing one warning.
 
 ### Choosing a model
 

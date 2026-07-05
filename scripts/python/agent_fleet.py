@@ -125,6 +125,10 @@ def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[
             prompt = prompt.rstrip() + f"\n\n## Task\n\n{task_text.strip()}\n"
         prompt_path = _write_prompt(repo, prompt, name)
         info(f"agent {i}/{n}: {name} worktree={wt_path} prompt={prompt_path}")
+        # Read the prompt into a Python string and pass it directly via
+        # --append-system-prompt. Don't shell out to `cat` — that breaks
+        # on Windows where `cat` isn't on PATH inside the herdr spawn.
+        prompt_body = prompt_path.read_text(encoding="utf-8")
         cmd = [
             "herdr", "agent", "start", name,
             "--cwd", wt_path,
@@ -133,7 +137,7 @@ def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[
             "--",
             "claude",
             "--append-system-prompt",
-            f"@$(cat {prompt_path})",
+            prompt_body,
         ]
         if model:
             cmd.extend(["--model", model])
@@ -156,7 +160,10 @@ def _spawn_treehouse(repo: Path, n: int, task: str, worktree: bool, model: Optio
         name = f"fleet-{i}"
         wt_path = str(repo)
         if worktree:
-            lease = run_command(["treehouse", "get", "--lease", "--label", f"agent-{name}"], cwd=repo)
+            lease = run_command(
+                ["treehouse", "get", "--lease", "--lease-holder", f"agent-{name}"],
+                cwd=repo,
+            )
             if lease.returncode == 0:
                 wt_path = lease.stdout.strip().splitlines()[-1] if lease.stdout.strip() else str(repo)
         prompt = _fleet_prompt(repo, task, i, n, wt_path)
@@ -164,7 +171,8 @@ def _spawn_treehouse(repo: Path, n: int, task: str, worktree: bool, model: Optio
             prompt = prompt.rstrip() + f"\n\n## Task\n\n{task_text.strip()}\n"
         prompt_path = _write_prompt(repo, prompt, name)
         info(f"agent {i}/{n}: {name} worktree={wt_path} prompt={prompt_path}")
-        cmd = ["claude", "--append-system-prompt", f"@$(cat {prompt_path})"]
+        prompt_body = prompt_path.read_text(encoding="utf-8")
+        cmd = ["claude", "--append-system-prompt", prompt_body]
         if model:
             cmd.extend(["--model", model])
         # Detached: write a launcher script and start it in the background.
