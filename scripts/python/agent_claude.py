@@ -113,6 +113,11 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         return _spawn_claude(repo, model)
     worktree_path = wt_result.stdout.strip() or str(repo)
     info(f"worktree: {worktree_path}")
+    # Pass the prompt as `--append-system-prompt-file <path>` so we don't
+    # have to shell out to `cat` (which is not on PATH inside the herdr
+    # spawn on Windows) and we don't have to inline a multi-KB string into
+    # a command line. Claude Code reads the file directly.
+    prompt_body = prompt_path.read_text(encoding="utf-8")
     cmd = [
         "herdr",
         "agent",
@@ -126,9 +131,11 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         "--",
         "claude",
         "--append-system-prompt",
-        f"$(cat {prompt_path})",
+        prompt_body,
+        "--model",
+        model,
     ]
-    info(f"running: {' '.join(cmd)}")
+    info(f"running: herdr agent start {agent_name} -- claude --append-system-prompt <{prompt_path}> --model {model}")
     result = run_command(cmd, cwd=repo)
     return result.returncode
 

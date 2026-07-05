@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`agent-go`** — the one-liner cold-machine bootstrap. Paste
+  `iex (irm …/install.ps1)` on a fresh Windows box, or
+  `curl -fsSL …/install.sh | sh` on macOS/Linux/WSL, and you end up
+  with the full toolkit (helpers on PATH, claude, herdr, firstmate,
+  no-mistakes, treehouse, gnhf, ollama, wezterm all installed) and
+  herdr started in the background. Then `agent-go` from inside any
+  repo assembles the global rules into a system prompt and launches
+  `claude` in a herdr pane (or in the current shell with `--no-herdr`).
+  - `agent-go --print-cmd` prints the one-liner for docs.
+  - `agent-go --print-prompt` prints the assembled prompt to stdout.
+  - `agent-go --no-bootstrap` skips the install step.
+  - `agent-go --task {code,review,architecture,documentation,general}`
+    layers in the matching task prompt.
+- **Top-level `install.ps1` and `install.sh`** that the one-liner
+  fetches. Clones the repo into `~/.agent-workbench/`, runs
+  `agent-init --bootstrap=all`, adds `~/.local/bin` to the user PATH
+  (HKCU on Windows, `~/.bashrc` + `~/.zshrc` on unix; no admin needed),
+  and prints the next step.
 - **Auto-install of external dependencies** via the new `agent-bootstrap` command
   and `agent-init --bootstrap` flag. Defaults: herdr, firstmate, no-mistakes,
   treehouse. Supports `--bootstrap=<list>`, `--all`, `--no-bootstrap`, `--no-curl`,
@@ -54,6 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent-fleet` so `agent-init` installs the full set of 8 helpers.
 
 ### Fixed
+- **`agent-claude` herdr backend no longer uses `$(cat <file>)`** to
+  pass the system prompt to `claude` (that breaks on Windows where
+  `cat` is not on PATH inside the herdr spawn). It now reads the
+  prompt into a Python string and passes it via the standard
+  `--append-system-prompt <body>` flag.
 - **`build_prompt.py` no longer self-includes its own outputs**:
   `.agent/SYSTEM_PROMPT.md` and `.agent/SYSTEM_PROMPT.fleet-N.md` are
   produced by the workbench itself, so loading them back into a future

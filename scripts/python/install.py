@@ -40,6 +40,7 @@ HELPERS = [
     "agent-claude",
     "agent-bootstrap",
     "agent-fleet",
+    "agent-go",
 ]
 
 

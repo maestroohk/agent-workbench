@@ -51,12 +51,15 @@ cd agent-workbench
 ### One-line install (Windows PowerShell)
 
 ```powershell
-git clone https://github.com/<your-org>/agent-workbench.git
-cd agent-workbench
-.\scripts\powershell\agent-init.ps1
+iex (irm https://raw.githubusercontent.com/maestroohk/agent-workbench/main/install.ps1)
 ```
 
-If your PowerShell execution policy blocks the script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then re-run.
+This single line clones the toolkit into `~/.agent-workbench/`, symlinks
+the helper shims into `~/.local/bin/`, adds that directory to your user
+PATH (no admin required), and bootstraps `claude`, `herdr`, `firstmate`,
+`no-mistakes`, `treehouse`, `gnhf`, `ollama`, and `wezterm` — picking
+the right install method per platform (winget, choco, npm, or the
+project's own curl-piped installer).
 
 ### Docker
 
@@ -73,6 +76,7 @@ After installation, the following commands are available on `PATH`:
 | Command         | Purpose                                                   |
 | --------------- | --------------------------------------------------------- |
 | `agent-init`    | Install or update the toolkit and its external dependencies |
+| `agent-go`      | One-liner cold-machine bootstrap: install missing tools, start herdr, run claude with the global rules pre-applied |
 | `agent-bootstrap` | Install external dependencies (herdr, firstmate, no-mistakes, treehouse) on demand |
 | `agent-scan`    | Generate `.agent/` summaries for the current repository   |
 | `agent-check`   | Validate the repository (structure, firstmate doctor, no-mistakes) |
@@ -80,6 +84,41 @@ After installation, the following commands are available on `PATH`:
 | `agent-test`    | Run the detected test suite, or `firstmate test` if firstmate is installed |
 | `agent-claude`  | Launch Claude Code (or ollama) with the assembled system prompt |
 | `agent-fleet`   | Spawn N Claude agents in parallel, each in an isolated herdr pane and worktree |
+
+### Cold-machine flow (one line)
+
+```powershell
+iex (irm https://raw.githubusercontent.com/maestroohk/agent-workbench/main/install.ps1)
+```
+
+That single line takes a fresh Windows box to a fully-set-up toolkit.
+On a fresh macOS / Linux / WSL box:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maestroohk/agent-workbench/main/install.sh | sh
+```
+
+After that, on any repo:
+
+```bash
+cd ~/code/my-project
+agent-go                       # installs any missing tool, starts herdr in the background,
+                               # then launches `claude` in a herdr pane with the
+                               # global rules (AGENTS.md + repo summaries + project
+                               # instructions) auto-applied.
+```
+
+Flags:
+
+- `agent-go --task code` — layer in the coding-agent prompt
+- `agent-go --task review` — layer in the review-agent prompt
+- `agent-go --no-bootstrap` — skip the install step (tools already present)
+- `agent-go --no-herdr` — run `claude` in the current shell, no herdr isolation
+- `agent-go --print-cmd` — print the one-liner and exit (handy for docs)
+- `agent-go --print-prompt` — print the assembled prompt to stdout and exit
+
+The other tools (`no-mistakes`, `gnhf`, `firstmate test`, `agent-fleet`)
+are on PATH and used by Claude Code as needed.
 
 ### Typical flow
 

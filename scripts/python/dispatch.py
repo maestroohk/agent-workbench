@@ -30,6 +30,7 @@ COMMANDS = {
     "claude": "agent_claude",
     "bootstrap": "bootstrap",
     "fleet": "agent_fleet",
+    "go": "agent_go",
 }
 
 
