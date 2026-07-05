@@ -200,11 +200,55 @@ def _matches_platform(method: dict, platform_name: str) -> bool:
     return False
 
 
-def _run_method(method_args: list[str]) -> tuple[bool, str]:
-    """Run one install method. Return (ok, output)."""
+# Per-install-method timeout. The herdr / no-mistakes / treehouse
+# installers each download a multi-MB archive; default 180s is generous
+# on slow connections and tight enough to fail fast on a dead URL.
+_DEFAULT_INSTALL_TIMEOUT = 180
+
+
+def _resolve_powershell() -> Optional[str]:
+    """Pick the best PowerShell binary on Windows: pwsh (7+) before powershell (5.1).
+
+    pwsh handles some command-line quoting better and is what the modern
+    installer scripts target. Returns the absolute path or None.
+    """
+    if os.name != "nt":
+        return None
+    for name in ("pwsh.exe", "pwsh", "powershell.exe", "powershell"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _run_method(method_args: list[str], *, timeout: int = _DEFAULT_INSTALL_TIMEOUT) -> tuple[bool, str]:
+    """Run one install method. Return (ok, output).
+
+    Robust against:
+    - Executable missing on PATH (`FileNotFoundError`) — returns ok=False.
+    - Hung download — `timeout` aborts the subprocess.
+    - Non-zero exit from the installer script — already handled via returncode.
+    - The first argv element being a bare `powershell` on Windows — we
+      resolve it to a full path so `CreateProcess` never has to guess.
+    """
     expanded = [os.path.expandvars(a) for a in method_args]
+    # On Windows, prefer pwsh over powershell and resolve to a full path
+    # so the subprocess can always find the interpreter.
+    if expanded and expanded[0].lower() in ("powershell", "powershell.exe", "pwsh", "pwsh.exe"):
+        full = _resolve_powershell()
+        if full:
+            expanded[0] = full
+        else:
+            return False, "powershell/pwsh not on PATH; cannot run Windows installer"
     info(f"trying: {' '.join(expanded[:3])}…")
-    result = subprocess.run(expanded, capture_output=True, text=True)
+    try:
+        result = subprocess.run(expanded, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        return False, f"executable not found: {expanded[0]} ({exc})"
+    except subprocess.TimeoutExpired as exc:
+        return False, f"timed out after {timeout}s: {' '.join(expanded[:3])}…"
+    except OSError as exc:
+        return False, f"OSError: {exc}"
     combined = ((result.stdout or "") + (result.stderr or "")).strip()
     return result.returncode == 0, combined[:500]
 
@@ -264,7 +308,19 @@ def install_dependencies(names: Optional[list[str]] = None, *, allow_curl: bool 
                 m for m in dep["install"]
                 if not any("curl" in (a if isinstance(a, str) else "") or "irm" in (a if isinstance(a, str) else "") for v in m.values() for a in v)
             ]
-        results.append(install_dependency(name, platform_name=platform_name))
+        # Defensive: an unexpected exception in one tool's install must
+        # not crash the whole bootstrap. The remaining tools still get
+        # their turn, and the user sees a clear per-tool error.
+        try:
+            results.append(install_dependency(name, platform_name=platform_name))
+        except Exception as exc:  # noqa: BLE001 — we want to keep going
+            results.append(DependencyStatus(
+                name=name,
+                purpose=DEPENDENCIES[name]["purpose"],
+                present=False,
+                error=f"unexpected error: {type(exc).__name__}: {exc}",
+            ))
+            info(f"{name}: unexpected error {type(exc).__name__}: {exc}")
     return results
 
 
