@@ -1,7 +1,13 @@
 # agent-workbench: scan the current repository.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py scan`. The
+# inner `scan_repo.main()` is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Repo
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,8 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('scan')
-if ($Repo) { $forward += @('--repo', $Repo) }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'scan' @Rest
 exit $LASTEXITCODE
