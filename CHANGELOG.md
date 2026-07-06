@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Runtime / provider selection for `agent-go`, `agent-claude`,
+  and `agent-fleet`.** Three first-class runtimes:
+  - `claude` — Anthropic Claude Code (default).
+  - `ollama` — local Ollama (`ollama run <model>`).
+  - `openai-compatible` — Claude Code pointed at a custom
+    `ANTHROPIC_BASE_URL`, for LM Studio, vLLM, LiteLLM, and any
+    provider that speaks the Anthropic wire protocol through that
+    env var.
+
+  Selection order: **CLI > env > config > default** for both the
+  runtime name and the model name. CLI flags live on every
+  `agent-go` / `agent-claude` / `agent-fleet` invocation
+  (`--runtime`, `--model`, `--base-url`, `--api-key-env`); the env
+  vars are `AGENT_RUNTIME` and `AGENT_MODEL`; the config file
+  lives at `~/.agent-workbench/config.toml` with four sections
+  (`[runtime]`, `[claude]`, `[ollama]`, `[openai_compatible]`).
+
+  Default model is **runtime-specific**: `opus` for `claude`,
+  `minimax-m3:cloud` for `ollama` and `openai-compatible`. The
+  legacy top-level `model = "..."` config form is honored as a
+  fallback so existing users don't have to migrate.
+
+- **Claude Code login detection.** `agent-go` (and
+  `agent-claude`) now probe `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `$CLAUDE_CONFIG_DIR/.credentials.json`, `~/.claude/.credentials.json`,
+  and the legacy `~/.claude.json` before launching. If none are
+  set, the user gets the documented fallback message and exits 0
+  instead of being dropped into a broken pane that says
+  `Not logged in · Run /login`:
+  ```
+  Claude Code opened but is not logged in.
+  Run `/login` inside Claude, or use:
+    agent-go --task code --runtime ollama --model <model>
+    agent-go --task code --runtime openai-compatible --model <model> --base-url <url>
+  ```
+
+- **`scripts/python/runtime.py`** — the single source of truth for
+  runtime resolution. Exports `Runtime` (frozen dataclass),
+  `RUNTIMES` (canonical list), `DEFAULT_MODELS` (runtime-specific),
+  `load_config()`, `resolve_runtime()`, `resolve_model()`,
+  `claude_logged_in()`, `claude_missing_login_message()`,
+  `build_spawn_args(runtime)` (the `(cmd, env_overrides)` factory),
+  and `runtime_summary_lines()`. Uses a small line-based parser
+  for the four-section config; no `tomli` dependency.
+
+- **`agent-go --print-cmd` and `--print-prompt` are now
+  runtime-aware.** The resolved runtime + model + base_url (for
+  `openai-compatible`) is printed at the top of the output so
+  docs reviewers can see what would be used without launching
+  anything.
+
+- **`--backend` is now orthogonal to `--runtime` on
+  `agent-claude` and `agent-fleet`.** `--backend` picks the
+  multi-agent orchestrator (herdr / treehouse / none for
+  `agent-fleet`; herdr / claude / ollama / none for
+  `agent-claude`); `--runtime` picks the model runner
+  (claude / ollama / openai-compatible). The herdr and treehouse
+  backends require `--runtime=claude` (herdr's `agent start` is
+  hardcoded to call the claude CLI via its integration hook);
+  the ollama and openai-compatible runtimes route to direct
+  spawn in the current shell.
+
+- **`utils.run_command()` now accepts an `env=` kwarg.** The
+  `openai-compatible` runtime uses this to inject
+  `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` into the
+  child's environment without mutating the current process's
+  environment. When `env=` is not passed, behaviour is unchanged
+  (the child inherits the parent env).
+
+- **`tests/test_runtime_provider.py`** — 53 regression tests
+  covering `resolve_runtime` (CLI > env > config > default,
+  unknown values fall through), `resolve_model` (runtime-specific
+  defaults, per-runtime config section, legacy top-level model
+  key), `load_config` (four sections, comments, blank lines,
+  missing/garbage file, `openai_compatible` -> `openai-compatible`
+  normalisation, OSError on read), `claude_logged_in` (env vars,
+  credentials file, legacy `.claude.json`, whitespace-treated-as-unset,
+  isolated `Path.home()` for the no-credentials case),
+  `claude_missing_login_message` (exact text from the spec),
+  `build_spawn_args` (claude / ollama / openai-compatible,
+  base-url + api-key-env kwargs, empty api-key value, unknown
+  runtime falls back to claude), `runtime_summary_lines` (with /
+  without base_url), and `agent_go.main` integration (the
+  `--runtime` / `--model` / `--base-url` / `--api-key-env` flags
+  parse, `--print-prompt` includes the runtime line,
+  `--runtime claude` with no login prints the fallback message
+  and exits 0, `--runtime claude` with a credentials file proceeds
+  past the login probe, `--runtime ollama` skips the login probe).
+
+- **`tests/test_agent_runtime_wiring.py`** — 25 regression tests
+  covering the new wiring in `agent-claude` and `agent-fleet`:
+  argparse (`--runtime` / `--base-url` / `--api-key-env` land in
+  the right `args` attributes; `--backend` stays orthogonal);
+  `agent_claude._resolve_full_runtime` (CLI > env > config >
+  default); `agent_fleet._resolve_backend` (claude runtime
+  prefers herdr; ollama and openai-compatible fall back to
+  `none`); the `agent_claude._spawn_claude` spawn paths (ollama
+  uses `ollama run <model>`; claude and openai-compatible use
+  `claude --model <model>`; only the openai-compatible path
+  injects env overrides); the `agent_fleet._spawn_none` spawn
+  paths (same env-override contract; the no-runner case writes
+  prompts only); and `utils.run_command` with and without
+  `env=`.
+
+### Fixed
+- **`agent-go --task code` opened Claude Code in herdr but
+  landed the user in a pane that said "Not logged in".** A user
+  without an Anthropic subscription had no documented path to a
+  working session. The runtime layer (above) gives them one: the
+  login probe prints the fallback message up-front, and the
+  `--runtime ollama` / `--runtime openai-compatible` flags route
+  to a working session.
+
 ### Fixed
 - **`agent-go --task code` now lands the agent in the worktree path,
   not the user's home directory.** A previous version of the shim

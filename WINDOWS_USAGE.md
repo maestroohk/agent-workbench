@@ -119,6 +119,39 @@ agent-go --task code
 flag for one-off use. In both cases, the instruction block is the
 last thing printed before `agent-go` exits 0.
 
+### Picking a runtime
+
+The default `--runtime claude` requires an Anthropic subscription (or an `ANTHROPIC_API_KEY` env var). On a clean Windows box without either, the login probe prints the documented fallback message and exits 0 instead of dropping you into a broken herdr pane:
+
+```
+agent-workbench: Claude Code opened but is not logged in.
+agent-workbench: Run `/login` inside Claude, or use:
+agent-workbench:   agent-go --task code --runtime ollama --model <model>
+agent-workbench:   agent-go --task code --runtime openai-compatible --model <model> --base-url <url>
+```
+
+Three modes:
+
+**A. Claude Code (`--runtime claude`, default).** Requires the `claude` CLI on PATH (installed by the default bootstrap) and either an Anthropic subscription with `claude /login` done, or `ANTHROPIC_API_KEY` set. Verify with `claude --version` and `claude /login`.
+
+**B. Ollama (`--runtime ollama`).** Local inference, no Anthropic account required. Install with `winget install Ollama.Ollama`, then `ollama pull minimax-m3:cloud`. Verify with `ollama list` (your model should appear). Run with:
+
+```powershell
+agent-go --task code --runtime ollama --model minimax-m3:cloud
+```
+
+**C. OpenAI-compatible (`--runtime openai-compatible`).** Reuses the `claude` CLI but points it at a custom `ANTHROPIC_BASE_URL`. Works for LM Studio, vLLM, LiteLLM proxy, and any provider that speaks the Anthropic wire protocol through that env var. Run with:
+
+```powershell
+$env:OPENAI_API_KEY = "lm-studio"   # or whatever your provider expects
+agent-go --task code --runtime openai-compatible `
+         --base-url http://localhost:1234/v1 `
+         --api-key-env OPENAI_API_KEY `
+         --model minimax-m3:cloud
+```
+
+Verify with `curl http://localhost:1234/v1/models` (LM Studio / vLLM / LiteLLM should return a JSON list).
+
 ### What if the herdr pane does not open?
 
 The flow above is the happy path. Three of the things that can go
@@ -269,6 +302,47 @@ The shim used to call `herdr agent start <name> --tab new`, which
 herdr rejected (`--tab` expects an existing tab ID, not the literal
 `new`). The fix is `--split right --no-focus`. If you are still
 seeing this, your checkout is out of date.
+
+### "I get `Claude Code opened but is not logged in` and exit 0."
+
+The login probe (env vars + credentials file + legacy `~/.claude.json`) found no credentials. Pick a different runtime:
+
+```powershell
+# Ollama (no Anthropic account needed)
+winget install Ollama.Ollama
+ollama pull minimax-m3:cloud
+agent-go --task code --runtime ollama --model minimax-m3:cloud
+
+# LM Studio / vLLM / LiteLLM (any OpenAI-compatible endpoint)
+$env:OPENAI_API_KEY = "lm-studio"
+agent-go --task code --runtime openai-compatible `
+         --base-url http://localhost:1234/v1 `
+         --api-key-env OPENAI_API_KEY
+
+# Or set up Claude Code login
+claude /login
+# (OAuth flow inside the Claude Code TUI)
+```
+
+### "`ollama: command not found` when I use `--runtime ollama`."
+
+Ollama is not on PATH. Install it:
+
+```powershell
+winget install Ollama.Ollama
+```
+
+Then verify with `ollama list` and `ollama pull minimax-m3:cloud` (or whatever model you want).
+
+### "`claude: command not found` when I use `--runtime openai-compatible`."
+
+The `openai-compatible` runtime reuses the `claude` CLI to talk to your custom endpoint — it does not bypass Claude Code. Install Claude Code as usual:
+
+```powershell
+npm install -g @anthropic-ai/claude-code
+```
+
+You do not need to log in to Anthropic (the custom endpoint replaces the auth); you do need the binary on PATH so `ANTHROPIC_BASE_URL` has a CLI to inject into.
 
 ## 8. gnhf on Windows
 
