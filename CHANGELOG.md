@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`tests/` directory with three test files** (`test_path_handling.py`,
+  `test_shell_profile_respect.py`, `test_tool_discovery.py`).
+  Coverage: Windows path resolution (backslashes, spaces, POSIX
+  paths), installer shell-profile respect (no silent writes to
+  `~/.bashrc` / `~/.zshrc` / HKCU PATH), and tool discovery
+  (role taxonomy, slim default set, `presence_hint` fallback).
+  Run with `pip install -r requirements-dev.txt && python -m pytest
+  tests/ -v`. 22 tests, all passing.
+- **`requirements-dev.txt`** with `pytest>=7.0` so the test suite is
+  a one-line install.
 - **`role` key on every `DEPENDENCIES` entry** in
   `scripts/python/bootstrap.py`. Each tool is now classified by its
   place in the workflow, not by its install method. The eight roles
@@ -20,6 +30,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DependencyStatus` keep their public signatures.
 
 ### Changed
+- **`install.sh` no longer silently edits `~/.bashrc` or `~/.zshrc`**.
+  Replaces the auto-append loop with a one-time message that prints
+  the export line and the right file to add it to (detected from
+  `$SHELL`: `~/.bashrc` for bash, `~/.zshrc` for zsh,
+  `~/.config/fish/config.fish` for fish, or a generic hint for
+  anything else). Session-only PATH is still set so the rest of the
+  installer (and any tools run in the same session) can resolve the
+  shims. This is a behavior change on clean installs: the user now
+  has to copy one line into their rc instead of having it appended.
+- **`install.ps1` now asks before persisting HKCU user PATH**.
+  The unconditional `[Environment]::SetEnvironmentVariable('Path',
+  ..., 'User')` call is replaced with a `Read-Host` prompt that
+  shows the proposed new `Path` value and asks "Apply this change?
+  [y/N]". The session-only `$env:Path` is still set unconditionally
+  so the rest of the installer works. The user can answer `N` and
+  run the installer the same way as before, just without the
+  registry write. Scripted installs can pipe `y` to opt in.
+- **Docs now reflect a role-based mental model**. New
+  `tools/roles.md` documents the eight roles
+  (`orchestrator`, `visual-collaboration`, `isolation-manager`,
+  `validation-gate`, `overnight-runner`, `agent-runtime`,
+  `model-runtime`, `terminal-fallback`) and the 9-step workflow.
+  `tools/firstmate.md` drops the `firstmate test` / `firstmate
+  doctor` / `firstmate build` claims and points at the role it fills
+  (`orchestrator`). `AGENTS.md` adds a section 8 ("Roles and the
+  workflow") and strengthens the Boundaries section to forbid silent
+  modifications to dotfiles / PATH / Git config. `README.md` adds a
+  "Mental model" section with the 9-step workflow and a Roles
+  table; the Dependencies table annotates each tool with its role;
+  the "Other tools" sentence in Usage no longer mentions
+  `firstmate test`.
 - **`DEFAULT_BOOTSTRAP_SET` slimmed** from
   `("herdr", "firstmate", "no-mistakes", "treehouse")` to
   `("herdr", "firstmate", "no-mistakes")`. `treehouse` is opt-in via
