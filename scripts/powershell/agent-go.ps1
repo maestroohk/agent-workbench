@@ -1,16 +1,14 @@
 # agent-workbench: agent-go — the one-liner cold-machine bootstrap.
+#
+# This shim is a thin pass-through. It does NOT pre-parse or pre-declare
+# any of the inner command's flags — all args are captured into $Rest and
+# forwarded verbatim to `dispatch.py go`. The inner `agent_go.main()` is
+# the single source of truth for argument parsing; if you want to add a
+# new flag, add it there, not here. This avoids the bug class where a
+# shim's pre-declared `param()` block injects an empty `--repo` (or
+# other default-valued flag) before the user's args reach the parser.
 [CmdletBinding()]
 param(
-    [string]$Repo,
-    [string]$Task = "general",
-    [string]$Model,
-    [string]$Bootstrap,
-    [switch]$NoBootstrap,
-    [switch]$NoCurl,
-    [switch]$NoHerdr,
-    [switch]$Yes,
-    [switch]$PrintCmd,
-    [switch]$PrintPrompt,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -51,18 +49,5 @@ foreach ($candidate in @('python', 'python3', 'py')) {
 }
 if (-not $python) { Write-Error "python is required"; exit 127 }
 
-$forward = @('go')
-if ($Repo)         { $forward += @('--repo', $Repo) }
-if ($Task)         { $forward += @('--task', $Task) }
-if ($Model)        { $forward += @('--model', $Model) }
-if ($Bootstrap)    { $forward += @('--bootstrap', $Bootstrap) }
-if ($NoBootstrap)  { $forward += '--no-bootstrap' }
-if ($NoCurl)       { $forward += '--no-curl' }
-if ($NoHerdr)      { $forward += '--no-herdr' }
-if ($Yes)          { $forward += '--yes' }
-if ($PrintCmd)     { $forward += '--print-cmd' }
-if ($PrintPrompt)  { $forward += '--print-prompt' }
-if ($Rest)         { $forward += $Rest }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'go' @Rest
 exit $LASTEXITCODE
