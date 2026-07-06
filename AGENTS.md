@@ -72,3 +72,31 @@ Load this file first. Project- and profile-specific instructions extend it; neve
 - Do not push to remote repositories unless explicitly instructed.
 - Do not publish packages, open pull requests, or send messages on the user's behalf.
 - Do not modify global system state, dotfiles, or PATH outside the installer's documented scope.
+- Do not silently modify `~/.bashrc`, `~/.zshrc`, PowerShell profile, user PATH, or Git config. If a persistent change is needed, ask first.
+
+## 8. Roles and the workflow
+
+The workbench orchestrates external tools, each filling a specific **role** at a specific point in the workflow. The roles are stable; the tools that fill them can change. `axi` is a design philosophy for agent-native CLIs (concise, structured, low-token); it is not a tool and not a dependency. The full mapping is in `tools/roles.md`; the short version:
+
+- `orchestrator` — firstmate. Top-level coordination for multi-agent work.
+- `visual-collaboration` — lavish-axi. Plans, mockups, diagrams, summaries.
+- `isolation-manager` — treehouse. Per-agent worktree pool.
+- `validation-gate` — no-mistakes. Pre-push review/test/lint gate.
+- `overnight-runner` — gnhf. Long-running autonomous loops. NOT for normal interactive tasks.
+- `agent-runtime` — herdr. Multiplexer for panes and worktrees.
+- `model-runtime` — claude (default) or ollama (fallback). The actual model runner.
+- `terminal-fallback` — wezterm. Optional GPU terminal.
+
+The 9-step workflow a session follows, with the role in parens on each step:
+
+1. Bootstrap / install prerequisites (`agent-runtime` + `model-runtime` + `validation-gate` + `orchestrator`).
+2. Verify PATH / tool availability without silently editing shell profiles.
+3. Scan the target repo and generate concise `.agent/` context (`agent-scan`).
+4. Create a visual plan with lavish-axi when the task is complex or UI-related (`visual-collaboration`).
+5. Use firstmate to delegate work to specialized agents (`orchestrator`).
+6. Use treehouse for isolated worktrees for agent tasks (`isolation-manager`).
+7. Run project tests / checks (`model-runtime` + `agent-test`).
+8. Run no-mistakes as the final validation gate (`validation-gate`).
+9. Produce a concise final report — preferably with lavish-axi if visual review is useful.
+
+See `tools/roles.md` for the full table and rationale.
