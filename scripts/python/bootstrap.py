@@ -88,9 +88,17 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "gnhf": {
         "probe": "gnhf",
-        "purpose": "Overnight autonomous agent runner.",
+        # gnhf is a Go binary published at github.com/kunchenguid/gnhf.
+        # The previous install method (`npm install -g gnhf`) was wrong
+        # — npm has no such package, and the silent failure mode
+        # confused users. Now we use the same _github_release path as
+        # no-mistakes and treehouse. As of 2026-07-06 the upstream
+        # ships darwin/linux releases; Windows is best-effort and the
+        # install will surface an honest "no asset" error rather than
+        # a silent failure.
+        "purpose": "Overnight autonomous agent runner (kunchenguid/gnhf, Go binary).",
         "install": [
-            {"any": ["npm", "install", "-g", "gnhf"]},
+            {"any": ["_github_release", "kunchenguid/gnhf", "gnhf"]},
         ],
     },
     "ollama": {
@@ -329,7 +337,14 @@ def _install_from_github_release(repo: str, binary_name: str, *, timeout: int = 
     #   <binary_name>-<tag>-<os>-<arch>.<ext>
     # e.g. no-mistakes-v1.31.2-windows-amd64.zip
     #      treehouse-v2.0.0-darwin-arm64.tar.gz
-    asset_name = f"{binary_name}-{tag}-{os_part}-{arch}.{ext}"
+    # Some projects (e.g. gnhf) tag their releases `<binary_name>-vX.Y.Z`
+    # already, so the binary name is duplicated if we concatenate. Strip
+    # a single leading `<binary_name>-` from the tag if present.
+    if tag.lower().startswith(f"{binary_name.lower()}-"):
+        clean_tag = tag[len(binary_name) + 1:]
+    else:
+        clean_tag = tag
+    asset_name = f"{binary_name}-{clean_tag}-{os_part}-{arch}.{ext}"
     download_url = None
     for asset in release.get("assets", []):
         if asset.get("name") == asset_name:
@@ -337,7 +352,7 @@ def _install_from_github_release(repo: str, binary_name: str, *, timeout: int = 
             break
     if not download_url:
         # Fallback: tag without leading "v".
-        bare = f"{binary_name}-{tag.lstrip('v')}-{os_part}-{arch}.{ext}"
+        bare = f"{binary_name}-{clean_tag.lstrip('v')}-{os_part}-{arch}.{ext}"
         for asset in release.get("assets", []):
             if asset.get("name") == bare:
                 download_url = asset.get("browser_download_url")
