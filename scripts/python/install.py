@@ -45,6 +45,13 @@ HELPERS = [
 ]
 
 
+class _PathSentinel:
+    """A stand-in for `Path | None` in lists, so callers can `.append(...)`
+    unconditionally and we filter them out at the end. Avoids the pattern
+    `installed.append(p) if p else None` cluttering the install loop."""
+    __slots__ = ()
+
+
 def _shim_dir(platform_name: str) -> str:
     return "powershell" if platform_name == "windows" else "bash"
 
@@ -64,31 +71,129 @@ def _try_symlink(source: Path, target: Path) -> bool:
         return False
 
 
+def _install_one_shim(
+    name: str,
+    *,
+    source: Path,
+    target: Path,
+    platform_name: str,
+    force: bool,
+) -> Path | None:
+    """Symlink or copy one shim. Returns the target on success, None on skip."""
+    if not source.is_file():
+        info(f"skip: source missing {source}")
+        return None
+    if target.exists() and not force:
+        info(f"keep: {target} (use --force to overwrite)")
+        return target
+    if _try_symlink(source, target):
+        info(f"link: {target} -> {source}")
+    else:
+        shutil.copy2(source, target)
+        if platform_name != "windows":
+            target.chmod(0o755)
+        info(f"copy: {target} <- {source}")
+    return target
+
+
 def _install_helpers(platform_name: str, *, force: bool) -> list[Path]:
+    """Install the agent-* helper shims into ~/.local/bin/.
+
+    On every platform we install two flavors:
+    - The platform-native shims (powershell .ps1 on Windows, bash on unix).
+      These are what the user runs from the platform's primary shell.
+    - The bash shims (no extension). On unix this is the same flavor as
+      the platform-native one (no-op duplicate); on Windows it gives Git
+      Bash / WSL users a stable `agent-init`, `agent-go`, ... invocation
+      without needing to install a separate PowerShell profile.
+
+    The previous behavior installed only the platform-native flavor,
+    which left Windows + Git Bash users without a working `agent-init`
+    in their shell.
+    """
     wb = workbench_root()
-    shim_dir = wb / "scripts" / _shim_dir(platform_name)
-    ext = _shim_extension(platform_name)
+    native_dir = wb / "scripts" / _shim_dir(platform_name)
+    native_ext = _shim_extension(platform_name)
     target_dir = AGENT_BIN_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     installed: list[Path] = []
+
     for name in HELPERS:
-        source = shim_dir / f"{name}{ext}"
-        if not source.is_file():
-            info(f"skip: source missing {source}")
-            continue
-        target = target_dir / f"{name}{ext}"
-        if target.exists() and not force:
-            info(f"keep: {target} (use --force to overwrite)")
-            installed.append(target)
-            continue
-        if _try_symlink(source, target):
-            info(f"link: {target} -> {source}")
-        else:
-            shutil.copy2(source, target)
-            if platform_name != "windows":
-                target.chmod(0o755)
-            info(f"copy: {target} <- {source}")
-        installed.append(target)
+        # Native shim.
+        installed.append(_install_one_shim(
+            name,
+            source=native_dir / f"{name}{native_ext}",
+            target=target_dir / f"{name}{native_ext}",
+            platform_name=platform_name,
+            force=force,
+        ) or _PathSentinel())
+        # Bash shim — always install alongside, on every platform. On
+        # Windows this gives Git Bash / WSL users a stable
+        # `agent-init`, `agent-go`, ... invocation. The shim is a thin
+        # wrapper that resolves the toolkit root via the marker file
+        # the installer writes, then dispatches to the platform's
+        # agent.sh (which already handles Python resolution on its
+        # platform). The Windows caveat: agent.sh's `command -v python`
+        # may be hijacked by the Microsoft Store App Execution Alias
+        # on some Windows + Git Bash setups, so the bash shim first
+        # tries the PowerShell wrapper (which already finds python via
+        # the registry) and only falls back to agent.sh if PowerShell
+        # is unavailable.
+        if native_ext == ".ps1":
+            bash_target = target_dir / name
+            if bash_target.exists() and not force:
+                info(f"keep: {bash_target} (use --force to overwrite)")
+                installed.append(bash_target)
+            else:
+                verb = name.replace("agent-", "")
+                # On Windows, prefer the PowerShell wrapper so we use
+                # its vetted python resolution. On unix, dispatch
+                # directly to agent.sh.
+                if platform_name == "windows":
+                    shim_body = (
+                        "#!/usr/bin/env bash\n"
+                        "# Auto-generated bash shim for the\n"
+                        "# agent-workbench helper on Windows. Delegates to\n"
+                        "# the PowerShell wrapper of the same name, which\n"
+                        "# already handles the python interpreter lookup\n"
+                        "# (the Windows App Execution Alias can hijack a\n"
+                        "# bare `python` call from a non-MSYS shell, so we\n"
+                        "# avoid the issue by going through PowerShell).\n"
+                        f'ps_exe=""\n'
+                        f'for n in powershell.exe pwsh.exe powershell pwsh; do\n'
+                        f'  if command -v "$n" >/dev/null 2>&1; then ps_exe="$n"; break; fi\n'
+                        f'done\n'
+                        f'if [ -z "$ps_exe" ]; then\n'
+                        f'  echo "agent-workbench: no powershell/pwsh on PATH; cannot run {name}" >&2\n'
+                        f'  exit 127\n'
+                        f'fi\n'
+                        f'exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$HOME/.local/bin/{name}.ps1" "$@"\n'
+                    )
+                else:
+                    shim_body = (
+                        "#!/usr/bin/env bash\n"
+                        "# Auto-generated bash shim for the\n"
+                        "# agent-workbench helper. Resolves the toolkit\n"
+                        "# root via ~/.local/bin/agent-workbench-home\n"
+                        "# and dispatches to scripts/bash/agent.sh.\n"
+                        f'_aw_home="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"\n'
+                        f'_aw_marker="${{_aw_home}}/agent-workbench-home"\n'
+                        f'if [ -f "${{_aw_marker}}" ]; then\n'
+                        f'  _aw_root="$(cat "${{_aw_marker}}")"\n'
+                        f'  exec "${{_aw_root}}/scripts/bash/agent.sh" {verb} "$@"\n'
+                        f'else\n'
+                        f'  echo "agent-workbench: marker not found at ${{_aw_marker}}; re-run agent-init" >&2\n'
+                        f'  exit 127\n'
+                        f'fi\n'
+                    )
+                bash_target.write_text(shim_body, encoding="utf-8")
+                bash_target.chmod(0o755)
+                info(f"copy: {bash_target} (generated bash shim)")
+                installed.append(bash_target)
+
+    # Drop the None sentinels.
+    installed = [p for p in installed if not isinstance(p, _PathSentinel)]
+
     # Write a marker file alongside the installed shims so the PowerShell
     # wrappers can find the toolkit root when run from `~/.local/bin/`.
     marker = target_dir / "agent-workbench-home"
