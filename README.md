@@ -88,10 +88,10 @@ iex (irm https://raw.githubusercontent.com/maestroohk/agent-workbench/main/insta
 
 This single line clones the toolkit into `~/.agent-workbench/`, symlinks
 the helper shims into `~/.local/bin/`, adds that directory to your user
-PATH (no admin required), and bootstraps `claude`, `herdr`, `firstmate`,
-`no-mistakes`, `treehouse`, `gnhf`, `ollama`, and `wezterm` — picking
-the right install method per platform (winget, choco, npm, or the
-project's own curl-piped installer).
+PATH (no admin required), and bootstraps the slim default set:
+`claude`, `herdr`, `firstmate`, `no-mistakes`, `ollama`. gnhf and
+treehouse are opt-in (the installer does not pull them on a clean
+install; `agent-init --bootstrap=gnhf,treehouse` adds them later).
 
 ### Docker
 
@@ -149,10 +149,34 @@ Flags:
 - `agent-go --no-herdr` — run `claude` in the current shell, no herdr isolation
 - `agent-go --print-cmd` — print the one-liner and exit (handy for docs)
 - `agent-go --print-prompt` — print the assembled prompt to stdout and exit
+  (read-only: no install, no herdr, no model launch)
 
 The other tools (`no-mistakes`, `gnhf`, `lavish-axi`, `agent-fleet`)
 are on PATH and used by Claude Code as needed. See `tools/roles.md`
 for the full role taxonomy and the 9-step workflow each session follows.
+
+### Windows-specific notes
+
+`agent-go` on a fresh Windows box has had three silent-failure modes
+that this round removes:
+
+1. `subprocess.run([claude])` blew up with
+   `OSError: [WinError 193] %1 is not a valid Win32 application`
+   because the bare `claude` on PATH is a Node.js shim, not a PE
+   binary. Now resolved via `utils.resolve_executable()` to the
+   real `claude.cmd` (or `.bat` / `.exe`).
+2. `herdr agent start` rejected `--tab new` (`agent placement
+   target new not found`) and the shim silently returned 0. Now
+   uses `--split right --no-focus` and routes failures to a
+   direct-claude fallback.
+3. `--print-prompt` triggered a noisy bootstrap that hit
+   `gnhf has no Windows release` even though the user just wanted
+   to read the prompt. Now `--print-prompt` is a true read-only
+   no-op.
+
+For the full screen-by-screen Windows flow, troubleshooting, and
+the `--no-herdr` / `--print-prompt` fallback paths, see
+[WINDOWS_USAGE.md](WINDOWS_USAGE.md).
 
 ### Typical flow
 

@@ -8,6 +8,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`agent-go` no longer fails silently when herdr cannot place an
+  agent on Windows (or anywhere else).** The shim now passes
+  `--cwd <repo>` to `herdr worktree create` (mandatory when no
+  workspace is active), uses `--split right --no-focus` for
+  `herdr agent start <name>` (the documented placement flag —
+  `--tab new` is rejected by herdr because `--tab` expects an
+  existing tab ID, not the literal `new`), and falls back to
+  direct `claude` with a clear info line if herdr errors.
+  Previously, a herdr placement failure returned 0 silently and
+  the user was dropped back at the PowerShell prompt with no
+  pane and no message.
+- **`agent-go --no-herdr` (and `agent-claude --backend=claude`) no
+  longer hit `WinError 193` on Windows.** Both now resolve
+  `claude` to `claude.cmd` (or the first `.bat` / `.exe` form
+  on PATH) before calling `subprocess.run`. The bug was that
+  the bare `claude` shim on `%APPDATA%\npm` is a Node.js script,
+  not a PE binary, and `CreateProcessW` rejects it with
+  `'%1 is not a valid Win32 application'`. herdr's own
+  `CreateProcessW` is fixed the same way: the inner `claude` is
+  resolved to its absolute `claude.cmd` path before being passed
+  to herdr.
+- **`agent-go --print-prompt` is now a true no-op read path:**
+  no install, no herdr, no model launch. The previous behavior
+  ran the full bootstrap first, which tried to install `gnhf`
+  (overnight-only) and produced a noisy `no asset matching`
+  error on Windows before the user ever saw their prompt.
+- **`agent-go`'s default bootstrap no longer includes `gnhf`**
+  (overnight-only, not used by interactive `agent-go`). The slim
+  default is now `claude, herdr, firstmate, no-mistakes, ollama`.
+  gnhf is one `--bootstrap=gnhf` away. `treehouse` is opt-in
+  for the same reason (worktree pool; `agent-fleet` is the
+  path that wants it).
+- **New `WINDOWS_USAGE.md`** with the step-by-step Windows
+  quickstart, troubleshooting for the three silent failures
+  above, and the `--no-herdr` / `--print-prompt` fallback
+  paths. Linked from the README's "Cold-machine flow" section.
+
+### Added
+- **`utils.resolve_executable(name)`** — the single source of
+  truth for Windows command resolution. On Windows it tries
+  `name.cmd`, `name.bat`, `name.exe` in that order before
+  falling back to the bare name, so `subprocess.run` no longer
+  hits `WinError 193` on npm shims. On non-Windows it is a
+  one-liner that returns `shutil.which(name)` unchanged. Used
+  everywhere `agent_go` and `agent_claude` spawn `claude`,
+  `ollama`, or `herdr` (including the inner `claude` passed to
+  herdr's `agent start`).
+- **`tests/test_windows_command_resolution.py`** — 16 regression
+  tests covering `resolve_executable` (Windows .cmd preference,
+  bare fallback, already-suffixed input, .exe fallback), the
+  `DEFAULT_GO_BOOTSTRAP` slim default (`gnhf` and `treehouse`
+  out; hot-path tools in), `--print-prompt` short-circuit (no
+  install, no herdr, no model launch), the `_spawn_claude`
+  argv contract (resolved .cmd, not bare shim), and the
+  `_spawn_via_herdr_agent` fallback contract (worktree create
+  failure → repo root + `--split right`; agent start failure →
+  direct `claude`).
+
+### Fixed
 - **Windows PowerShell shims no longer reject unknown args** (`--help`,
   `-h`, custom flags) at the PowerShell layer. Every
   `scripts/powershell/agent-*.ps1` is now a thin pass-through: a
