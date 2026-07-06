@@ -166,18 +166,35 @@ def run_command(
     cwd: Optional[Path] = None,
     timeout: Optional[int] = None,
     check: bool = False,
+    env: Optional[dict[str, str]] = None,
 ) -> CommandResult:
-    """Run a command and capture its output. Never raise on non-zero exit."""
+    """Run a command and capture its output. Never raise on non-zero exit.
+
+    `env` (optional): if provided, is merged on top of the current
+    process's environment and used for the child. Pass `env=...` to
+    inject `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` for an
+    openai-compatible runtime spawn without mutating the current
+    process's environment.
+    """
+    child_env: Optional[dict[str, str]] = None
+    if env:
+        child_env = os.environ.copy()
+        child_env.update(env)
+    run_kwargs: dict = dict(
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+    if child_env is not None:
+        run_kwargs["env"] = child_env
     try:
         completed = subprocess.run(
             args,
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
+            **run_kwargs,
         )
     except FileNotFoundError as exc:
         return CommandResult(returncode=127, stdout="", stderr=str(exc))

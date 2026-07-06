@@ -51,6 +51,7 @@ if str(_PYTHON_SRC) not in sys.path:
     sys.path.insert(0, str(_PYTHON_SRC))
 
 import agent_go  # noqa: E402
+import runtime as _runtime  # noqa: E402
 from utils import parse_json_loose  # noqa: E402
 
 
@@ -233,6 +234,22 @@ def _make_fake_resolve(tmp_path: Path):
     return {"herdr": herdr_path, "claude": str(claude_cmd)}
 
 
+def _claude_runtime(model: str) -> tuple:
+    """Build the (runtime, spawn_cmd, spawn_env) tuple for the claude
+    runtime. Mirrors what `agent_go.main()` does for `--runtime claude`.
+
+    The tests below were written against an earlier signature
+    (`_spawn_via_herdr_agent(repo, prompt_body, model)`); this helper
+    bridges them to the new signature that takes a `Runtime` object
+    plus the spawn argv / env. Using the helper keeps the tests
+    focused on the worktree / instruction-block contract rather than
+    on the new runtime plumbing.
+    """
+    runtime = _runtime.Runtime(name="claude", model=model, source="test")
+    spawn_cmd, spawn_env = _runtime.build_spawn_args(runtime)
+    return runtime, spawn_cmd, spawn_env
+
+
 class TestSpawnHerdrAgentUsesWorktreePath:
     """The bug: `agent-go` passed the entire `worktree_created` JSON
     envelope as `--cwd` to `herdr agent start`. herdr silently fell
@@ -274,8 +291,13 @@ class TestSpawnHerdrAgentUsesWorktreePath:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         rc = agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         assert rc == 0
 
@@ -313,8 +335,13 @@ class TestSpawnHerdrAgentUsesWorktreePath:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         start_calls = [c for c in captured if "agent" in c and "start" in c]
         start_argv = start_calls[0]
@@ -340,8 +367,13 @@ class TestSpawnHerdrAgentUsesWorktreePath:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         start_calls = [c for c in captured if "agent" in c and "start" in c]
         cwd_idx = start_calls[0].index("--cwd")
@@ -376,8 +408,13 @@ class TestCwdMismatchWarning:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         rc = agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         assert rc == 0  # We do not crash on mismatch; we warn.
         out = capsys.readouterr().err
@@ -413,8 +450,13 @@ class TestInstructionBlock:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         out = capsys.readouterr().err
         # All four required lines are in the instruction block.
@@ -449,8 +491,14 @@ class TestInstructionBlock:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud", auto_attach=False
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
+            auto_attach=False,
         )
         # No `herdr agent attach ...` call was made.
         attach_calls = [c for c in captured if "attach" in c]
@@ -481,8 +529,13 @@ class TestInstructionBlock:
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
         try:
+            runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
             agent_go._spawn_via_herdr_agent(
-                tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+                tmp_path,
+                prompt_body="test prompt",
+                runtime=runtime,
+                spawn_cmd=spawn_cmd,
+                spawn_env=spawn_env,
             )
             attach_calls = [c for c in captured if "attach" in c]
             assert attach_calls == []
@@ -509,8 +562,13 @@ class TestInstructionBlock:
         from scan_repo import AGENT_DIR_NAME
         (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         attach_calls = [c for c in captured if "attach" in c]
         assert attach_calls == []

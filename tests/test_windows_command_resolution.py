@@ -52,7 +52,18 @@ if str(_PYTHON_SRC) not in sys.path:
     sys.path.insert(0, str(_PYTHON_SRC))
 
 import agent_go  # noqa: E402
+import runtime as _runtime  # noqa: E402
 from utils import resolve_executable  # noqa: E402
+
+
+def _claude_runtime(model: str) -> tuple:
+    """Build the (runtime, spawn_cmd, spawn_env) tuple for the claude
+    runtime. Mirrors what `agent_go.main()` does for `--runtime claude`.
+    Kept in this test module so each spawn-using test can build a
+    runtime in one line."""
+    runtime = _runtime.Runtime(name="claude", model=model, source="test")
+    spawn_cmd, spawn_env = _runtime.build_spawn_args(runtime)
+    return runtime, spawn_cmd, spawn_env
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +302,12 @@ class TestSpawnClaudeResolution:
         fake_cmd.write_text("@echo off\r\n")
         monkeypatch.setattr("agent_go.resolve_executable", lambda name: str(fake_cmd))
 
+        # Pre-create the .agent/SYSTEM_PROMPT.md the spawn path reads
+        # for `--append-system-prompt`.
+        from scan_repo import AGENT_DIR_NAME
+        (tmp_path / AGENT_DIR_NAME).mkdir(parents=True, exist_ok=True)
+        (tmp_path / AGENT_DIR_NAME / "SYSTEM_PROMPT.md").write_text("test prompt")
+
         captured_argv: list = []
 
         def _fake_run(argv, **kwargs):  # noqa: ANN001
@@ -355,8 +372,13 @@ class TestHerdrFallback:
         agent_dir.mkdir(parents=True, exist_ok=True)
         (agent_dir / "SYSTEM_PROMPT.md").write_text("test prompt")
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         rc = agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         # The fallback to _spawn_claude should yield rc=0 (since we
         # made the direct claude subprocess.run return 0).
@@ -403,8 +425,13 @@ class TestHerdrFallback:
         agent_dir.mkdir(parents=True, exist_ok=True)
         (agent_dir / "SYSTEM_PROMPT.md").write_text("test prompt")
 
+        runtime, spawn_cmd, spawn_env = _claude_runtime("minimax-m3:cloud")
         rc = agent_go._spawn_via_herdr_agent(
-            tmp_path, prompt_body="test prompt", model="minimax-m3:cloud"
+            tmp_path,
+            prompt_body="test prompt",
+            runtime=runtime,
+            spawn_cmd=spawn_cmd,
+            spawn_env=spawn_env,
         )
         assert rc == 0
         # The herdr agent start call must have used the repo root as

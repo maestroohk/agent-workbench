@@ -48,6 +48,7 @@ from utils import (
 )
 
 import bootstrap as _bootstrap
+import runtime as _runtime
 
 
 # --- herdr JSON helpers --------------------------------------------------
@@ -280,8 +281,16 @@ def _start_herdr_server() -> bool:
     return False
 
 
-def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str, *, auto_attach: bool = True) -> int:
-    """Start a herdr agent that runs `claude --append-system-prompt <body>`.
+def _spawn_via_herdr_agent(
+    repo: Path,
+    prompt_body: str,
+    runtime: _runtime.Runtime,
+    spawn_cmd: list[str],
+    spawn_env: dict[str, str],
+    *,
+    auto_attach: bool = True,
+) -> int:
+    """Start a herdr agent that runs the given spawn_cmd (with env_overrides).
 
     Returns the herdr invocation's returncode. The agent runs in its own
     pane; the user can attach with `herdr agent attach primary`. If
@@ -290,6 +299,15 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str, *, auto_att
     directly in the agent's pane. Set `auto_attach=False` (or pass
     `--no-attach` / `AGENT_GO_NO_AUTO_ATTACH=1`) to skip the attach and
     just print the manual instruction block.
+
+    The `spawn_cmd` is the argv of the inner runner (`claude`,
+    `ollama`, etc.). The first element of `spawn_cmd` is the runner's
+    name; we resolve it to a real Windows executable (e.g. `claude.cmd`)
+    before handing it to herdr so herdr's own `CreateProcessW` does not
+    hit WinError 193 on the bare npm shim. The `spawn_env` dict is
+    merged into the herdr process's environment so the inner runner
+    inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` for the
+    openai-compatible runtime.
     """
     herdr = resolve_executable("herdr")
     if not herdr:
@@ -336,13 +354,24 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str, *, auto_att
                 f"herdr worktree create did not return a path; "
                 f"running agent in repo root instead"
             )
-    # Resolve the inner `claude` to a real Windows executable (e.g.
-    # `claude.cmd`) before handing it to herdr, so herdr's own
-    # CreateProcessW call does not hit WinError 193 on the bare npm shim.
-    claude = resolve_executable("claude")
-    if not claude:
-        info("claude CLI not found; falling back to running claude directly")
-        return _spawn_claude(repo, model)
+    # Resolve the inner runner (claude / ollama) to a real Windows
+    # executable (e.g. `claude.cmd`) before handing it to herdr, so
+    # herdr's own CreateProcessW call does not hit WinError 193 on
+    # the bare npm shim.
+    inner_name = spawn_cmd[0]
+    inner_resolved = resolve_executable(inner_name)
+    if not inner_resolved:
+        info(f"{inner_name} executable not found; falling back")
+        return _spawn_direct(repo, runtime, spawn_cmd, spawn_env)
+    # The ollama runtime does not understand --append-system-prompt
+    # (it is a Claude Code flag). For ollama, we drop the prompt
+    # arg and rely on .agent/SYSTEM_PROMPT.md being written; the
+    # user can paste the prompt into the pane. For claude and
+    # openai-compatible, the prompt is passed through normally.
+    if inner_name == "ollama":
+        inner_argv = [inner_resolved, *spawn_cmd[1:]]
+    else:
+        inner_argv = [inner_resolved, *spawn_cmd[1:], "--append-system-prompt", prompt_body]
     cmd = [
         herdr,
         "agent",
@@ -354,25 +383,29 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str, *, auto_att
         "right",
         "--no-focus",
         "--",
-        claude,
-        "--append-system-prompt",
-        prompt_body,
-        "--model",
-        model,
+        *inner_argv,
     ]
+    # Merge spawn_env into the herdr process's environment so the
+    # inner runner inherits ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN
+    # for the openai-compatible runtime. herdr itself does not read
+    # these vars; the inner claude process does.
+    child_env = None
+    if spawn_env:
+        child_env = os.environ.copy()
+        child_env.update(spawn_env)
     info(f"starting herdr agent 'primary' in {worktree_path}")
     # Capture stdout so we can read herdr's `agent_started` JSON envelope
     # and verify the agent actually started in the cwd we asked for.
     # The previous code discarded stdout and only printed a single line,
     # which masked the "agent started in $HOME" bug.
-    result = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=child_env)
     if result.returncode != 0:
         info(
             f"herdr agent start failed (exit {result.returncode}); "
             f"stderr: {result.stderr.strip()[:200] or '(empty)'}; "
-            f"falling back to direct claude"
+            f"falling back to direct {inner_name}"
         )
-        return _spawn_claude(repo, model)
+        return _spawn_direct(repo, runtime, spawn_cmd, spawn_env)
     # Pull the actual cwd herdr used from the `agent_started` envelope.
     started_payload = parse_json_loose(result.stdout)
     actual_cwd, agent_name = _extract_agent_info(started_payload)
@@ -391,15 +424,51 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str, *, auto_att
     return 0
 
 
+def _spawn_direct(
+    repo: Path,
+    runtime: _runtime.Runtime,
+    spawn_cmd: list[str],
+    spawn_env: dict[str, str],
+) -> int:
+    """Spawn the runner in the current shell (no herdr isolation).
+
+    Used as the direct fallback when herdr is not available, when
+    `--no-herdr` is set, or when the herdr spawn fails. For the
+    `claude` runtime, the prompt is appended; for `ollama` the
+    prompt is left to the user to paste in. For
+    `openai-compatible`, the env overrides are applied.
+    """
+    runner_name = spawn_cmd[0]
+    runner_path = resolve_executable(runner_name)
+    if not runner_path:
+        info(f"{runner_name} executable not found on PATH")
+        if runtime.is_claude():
+            return _spawn_ollama(repo, runtime.model)
+        return 127
+    argv = [runner_path, *spawn_cmd[1:]]
+    if runtime.is_claude() or runtime.is_openai_compatible():
+        # Claude Code accepts the prompt via --append-system-prompt.
+        # The prompt is also written to .agent/SYSTEM_PROMPT.md so
+        # Claude Code auto-loads it on its own.
+        prompt_path = repo / AGENT_DIR_NAME / "SYSTEM_PROMPT.md"
+        argv.extend(["--append-system-prompt", prompt_path.read_text(encoding="utf-8")])
+    info(f"running: {runner_path} (cwd={repo}, runtime={runtime.name}, model={runtime.model})")
+    child_env = None
+    if spawn_env:
+        child_env = os.environ.copy()
+        child_env.update(spawn_env)
+    result = subprocess.run(argv, cwd=str(repo), env=child_env)
+    return result.returncode
+
+
 def _spawn_claude(repo: Path, model: str) -> int:
     """Launch the `claude` CLI in the current repo (no herdr isolation)."""
-    claude = resolve_executable("claude")
-    if not claude:
-        info("claude CLI not found; falling back to ollama run")
-        return _spawn_ollama(repo, model)
-    info(f"running: {claude} (cwd={repo}, model={model})")
-    result = subprocess.run([claude], cwd=str(repo))
-    return result.returncode
+    return _spawn_direct(
+        repo,
+        _runtime.Runtime(name="claude", model=model, source="legacy"),
+        ["claude", "--model", model],
+        {},
+    )
 
 
 def _spawn_ollama(repo: Path, model: str) -> int:
@@ -430,9 +499,14 @@ def _print_one_liner() -> int:
     return 0
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _build_argparser() -> argparse.ArgumentParser:
+    """Build the argparse parser for `agent-go`.
+
+    Extracted from `main()` so tests can drive the parser directly
+    (e.g. to verify the `--runtime` / `--base-url` / `--api-key-env`
+    flags land in the right `args` attributes)."""
     parser = argparse.ArgumentParser(
-        description="One-liner cold-machine bootstrap: install missing tools, start herdr, run claude with global rules.",
+        description="One-liner cold-machine bootstrap: install missing tools, start herdr, run the model with global rules.",
     )
     parser.add_argument("--repo", type=Path, default=None, help="Repository root (auto-detected).")
     parser.add_argument(
@@ -441,7 +515,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="general",
         help="Which task-specific agent prompt to layer in.",
     )
-    parser.add_argument("--model", default=None, help="Override the model name (default: minimax-m3:cloud).")
+    parser.add_argument(
+        "--runtime",
+        choices=_runtime.RUNTIMES,
+        default=None,
+        help="Which model runner to use (default: from AGENT_RUNTIME or config). "
+             "claude=Anthropic Claude Code, ollama=local Ollama, "
+             "openai-compatible=Claude Code pointed at ANTHROPIC_BASE_URL.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the model name. Default per runtime: claude=opus, "
+             "ollama=minimax-m3:cloud, openai-compatible=minimax-m3:cloud.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="(openai-compatible) The Anthropic-protocol base URL "
+             "(e.g. http://localhost:1234/v1 for LM Studio).",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        help="(openai-compatible) Name of the env var holding the API key "
+             "(e.g. OPENAI_API_KEY). The value is read at spawn time.",
+    )
     parser.add_argument(
         "--bootstrap",
         default=",".join(DEFAULT_GO_BOOTSTRAP),
@@ -476,13 +575,64 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="",
         help="Optional task description appended to the prompt.",
     )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = _build_argparser()
     args = parser.parse_args(argv)
 
+    # Load the workbench config up-front so both --print-prompt and
+    # the runtime resolution layers see the same view of the file.
+    config = _runtime.load_config()
+
     if args.print_cmd:
+        # --print-cmd is runtime-agnostic: the one-liner does not change
+        # when the runtime does. But we still print what would be used
+        # so docs reviewers can see the resolved runtime + model.
+        rt_name, rt_source = _runtime.resolve_runtime(
+            cli_value=args.runtime,
+            env_value=os.environ.get("AGENT_RUNTIME"),
+            config=config,
+        )
+        rt_model, _ = _runtime.resolve_model(
+            rt_name,
+            cli_model=args.model,
+            env_model=os.environ.get("AGENT_MODEL"),
+            config=config,
+        )
+        info(f"resolved runtime: {rt_name} (from {rt_source})")
+        info(f"resolved model:   {rt_model}")
         return _print_one_liner()
 
     repo = (args.repo or find_repo_root()).resolve()
     info(f"repo: {repo}")
+
+    # Resolve the runtime up-front so both the read-only path
+    # (--print-prompt) and the actual launch can print the same
+    # "what we are going to use" block.
+    rt_name, rt_source = _runtime.resolve_runtime(
+        cli_value=args.runtime,
+        env_value=os.environ.get("AGENT_RUNTIME"),
+        config=config,
+    )
+    rt_model, model_source = _runtime.resolve_model(
+        rt_name,
+        cli_model=args.model,
+        env_model=os.environ.get("AGENT_MODEL"),
+        config=config,
+    )
+    runtime = _runtime.Runtime(
+        name=rt_name,
+        model=rt_model,
+        base_url=args.base_url,
+        api_key_env=args.api_key_env,
+        source=rt_source,
+    )
+    for line in _runtime.runtime_summary_lines(runtime):
+        info(line)
+    info(f"runtime source:  {rt_source}")
+    info(f"model source:    {model_source}")
 
     # Step 1: assemble the prompt. Done up-front so the read-only paths
     # (`--print-prompt`) can return before the install step touches the
@@ -496,6 +646,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     info(f"prompt: {len(body):,} bytes from {len(loaded)} file(s)")
     if args.print_prompt:
         # Pure read path. No install, no herdr, no model launch.
+        # The runtime resolution already printed; the prompt body
+        # follows on stdout for piping / diffing.
         sys.stdout.write(body)
         return 0
 
@@ -516,20 +668,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     out.write_text(body, encoding="utf-8")
     info(f"wrote {out}")
 
-    # Step 4: start herdr in the background, unless asked not to.
+    # Step 4: Claude-login probe. If the user selected the claude
+    # runtime and Claude is not logged in, print the fallback
+    # message and exit 0. We do not even start herdr in this case
+    # because the only outcome is a broken pane.
+    if runtime.is_claude() and not _runtime.claude_logged_in():
+        info("Claude Code is not logged in and no ANTHROPIC_API_KEY is set.")
+        info(_runtime.claude_missing_login_message(task=args.task))
+        return 0
+
+    # Step 5: build the spawn argv + env for the resolved runtime.
+    spawn_cmd, spawn_env = _runtime.build_spawn_args(
+        runtime,
+        base_url=args.base_url,
+        api_key_env=args.api_key_env,
+    )
+    info(f"spawn: {' '.join(spawn_cmd)}")
+
+    # Step 6: start herdr in the background, unless asked not to.
     herdr_up = False
     if not args.no_herdr:
         herdr_up = _start_herdr_server()
 
-    # Step 5: launch the model.
-    model = args.model or os.environ.get("AGENT_MODEL") or DEFAULT_MODEL
-    info(f"model: {model}")
+    # Step 7: launch the model. The claude and openai-compatible
+    # runtimes use the herdr pane path (with auto-attach); the
+    # ollama runtime uses the herdr pane path too (we just spawn
+    # `ollama run` inside the pane instead of `claude`). The
+    # --no-herdr path drops back to the direct (in-shell) spawn.
     auto_attach = not args.no_attach
-    if herdr_up and resolve_executable("claude"):
-        return _spawn_via_herdr_agent(repo, body, model, auto_attach=auto_attach)
-    if resolve_executable("claude"):
-        return _spawn_claude(repo, model)
-    return _spawn_ollama(repo, model)
+    if herdr_up and not args.no_herdr:
+        return _spawn_via_herdr_agent(
+            repo, body, runtime, spawn_cmd, spawn_env, auto_attach=auto_attach
+        )
+    return _spawn_direct(repo, runtime, spawn_cmd, spawn_env)
 
 
 if __name__ == "__main__":
