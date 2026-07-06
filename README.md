@@ -155,6 +155,59 @@ The other tools (`no-mistakes`, `gnhf`, `lavish-axi`, `agent-fleet`)
 are on PATH and used by Claude Code as needed. See `tools/roles.md`
 for the full role taxonomy and the 9-step workflow each session follows.
 
+### Runtimes and providers
+
+`agent-go` / `agent-claude` / `agent-fleet` all accept
+`--runtime {claude, ollama, ollama-chat, openai-compatible}` to
+pick the model runner. The selected runtime is visible in the
+7-line pre-launch output before any spawn:
+
+```
+agent-workbench: runtime:      ollama
+agent-workbench: runtime mode: claude-via-ollama
+agent-workbench: model:        minimax-m3:cloud
+agent-workbench: backend:      herdr
+agent-workbench: command:      claude --model minimax-m3:cloud
+agent-workbench: agent:        primary-2
+agent-workbench: cwd:          C:\path\to\repo
+```
+
+- `claude` — Anthropic Claude Code. Default.
+- `ollama` — Claude Code pointed at ollama's local
+  OpenAI-compatible HTTP endpoint
+  (`ANTHROPIC_BASE_URL=http://localhost:11434`). This is
+  Claude-Code-via-ollama, not the plain chat REPL: a user
+  without Anthropic login can run
+  `agent-go --task code --runtime ollama --model <model>` and
+  get a Claude-Code-like coding agent backed by the selected
+  Ollama model.
+- `ollama-chat` — the plain `ollama run <model>` REPL.
+  Opt-in path for users who specifically want that UX.
+- `openai-compatible` — Claude Code pointed at any custom
+  `ANTHROPIC_BASE_URL` (LM Studio, vLLM, LiteLLM, etc.). Use
+  `--base-url <url>` and `--api-key-env <name>`.
+
+### Setup
+
+`agent-go --setup` writes `~/.agent-workbench/config.toml`
+interactively. If `lavish-axi` is on PATH, the setup defers
+to it; otherwise, a short terminal prompt walks the user
+through runtime / model / mode / backend / UI choices. The
+written file is self-documenting (commented) so the user can
+read and edit it without re-running `--setup`. Existing files
+are asked before overwriting. The flow is optional — every
+flag works without it.
+
+### Herdr `agent_name_taken` auto-recovery
+
+If herdr returns `agent_name_taken` (or any "is already used"
+marker) for the default `primary` agent name, the spawn
+retries with `primary-2`, `primary-3`, ..., `primary-5`,
+then `primary-<6-hex>` short ids. Up to 8 attempts in
+`agent-go` / `agent-claude`, 4 per agent in `agent-fleet`;
+on exhaustion the spawn falls back to the direct runner with
+a clear message.
+
 ### Windows-specific notes
 
 `agent-go` on a fresh Windows box has had three silent-failure modes

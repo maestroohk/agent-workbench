@@ -544,6 +544,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution used to fail because `..\..` doesn't reach the toolkit. Fixed
   via the marker-file approach described above.
 
+### Added
+- **`--runtime ollama` is now Claude-Code-via-ollama by default.**
+  The `ollama` runtime no longer runs `ollama run <model>` (which
+  drops the user into a chat REPL with `>>> Send a message`).
+  It runs `claude --model <model>` with
+  `ANTHROPIC_BASE_URL=http://localhost:11434` and
+  `ANTHROPIC_AUTH_TOKEN=ollama`, pointing Claude Code at ollama's
+  OpenAI-compatible HTTP endpoint. The same coding-agent UX, the
+  model is local. A user without Anthropic login can now run
+  `agent-go --task code --runtime ollama --model minimax-m3:cloud`
+  and get a Claude-Code-like coding agent inside Herdr, backed by
+  the selected Ollama model.
+- **New runtime `--runtime ollama-chat`** for the plain
+  `ollama run <model>` chat REPL. This is the opt-in path, not
+  the default for `agent-go --task code`. The runtime resolves
+  its model from `[ollama_chat]` in the config (with the
+  `[ollama]` section as a fallback for legacy configs).
+- **`[ollama].mode` config field** lets users pick the runtime
+  shape at the config layer. `mode = "claude"` (default) is the
+  claude-via-ollama flow described above; `mode = "chat"` is the
+  plain `ollama run` REPL. The mode can also be overridden via
+  the `AGENT_OLLAMA_MODE` env var.
+- **`agent-go --setup`** — an interactive first-run flow that
+  writes `~/.agent-workbench/config.toml`. If `lavish-axi` is on
+  PATH, the setup defers to it (treated as a black box — the
+  user saves the page and we read the file back). Otherwise, a
+  short terminal prompt walks the user through runtime, model,
+  mode (for ollama), backend, and UI choices. The written file
+  is self-documenting (commented) so the user can read and edit
+  it without re-running `--setup`. Existing files are asked
+  before overwriting. The flow is optional — every flag works
+  without it.
+- **herdr `agent_name_taken` auto-recovery** in `agent-go`,
+  `agent-claude`, and `agent-fleet`. If herdr returns
+  `agent_name_taken` (or any "is already used" / "name already
+  in use" marker), the spawn retries with `primary-2`,
+  `primary-3`, ..., `primary-5`, then `primary-<6-hex>` short
+  ids. Up to 8 attempts (`agent-go` / `agent-claude`) or 4
+  attempts (`agent-fleet`); on exhaustion the spawn falls back
+  to the direct runner with a clear message.
+- **Pre-launch output block (7 lines)** printed before the
+  spawn so the user can see what is about to run:
+  ```
+  agent-workbench: runtime:      ollama
+  agent-workbench: runtime mode: claude-via-ollama
+  agent-workbench: model:        minimax-m3:cloud
+  agent-workbench: backend:      herdr
+  agent-workbench: command:      claude --model minimax-m3:cloud
+  agent-workbench: agent:        primary-2
+  agent-workbench: cwd:          C:\path\to\repo
+  ```
+  The first three lines (runtime / mode / model) are printed
+  before any spawn attempt; the rest are printed after a
+  successful herdr spawn (or on fallback).
+- **`[backend]` and `[ui]` config sections.** `[backend] default`
+  picks the orchestrator (herdr / treehouse / none); `[ui] setup`
+  picks the setup UI (lavish-axi / terminal). Both are read by
+  `agent-go --setup` and by the backend resolution layer.
+- **`utils.unique_agent_name(base, attempt)`** — deterministic
+  unique agent names: `base` on attempt 0, `base-2..base-5` on
+  attempts 1..4, `base-<6-hex>` short id on attempts 5+.
+  `utils.is_agent_name_taken_error()` is the matching
+  case-insensitive substring probe. Both helpers are shared
+  by all three herdr-using commands.
+
+### Changed
+- **`scripts/python/runtime.py` runtime taxonomy** is now
+  `(claude, ollama, ollama-chat, openai-compatible)`. The
+  `Runtime` dataclass gained a `mode: str = "default"` field;
+  `Runtime.is_ollama_chat()` and the `_runtime_mode_label()`
+  helper expose the resolved mode to the spawn layer. The
+  `_build_ollama_args()` helper was renamed
+  `_build_ollama_claude_args()` and now returns
+  `["claude", "--model", m]` with the ollama env overrides;
+  `_build_ollama_chat_args()` is the new opt-in chat REPL path.
+- **`agent-claude` and `agent-fleet` now retry on herdr
+  `agent_name_taken`** (defensive — covers the case where a
+  previous `agent-go` session left a stale `primary` on the
+  server). Same retry shape as `agent-go` (8 attempts in
+  `agent-claude`, 4 per agent in `agent-fleet`).
+
 ### Out of scope (deferred to a future round)
 - Replacing the per-script PowerShell wrappers with a single delegating
   dispatcher (the bash vs PS divergence in the original repo).

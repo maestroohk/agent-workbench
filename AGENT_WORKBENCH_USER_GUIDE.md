@@ -13,7 +13,7 @@
 
 1. [High-level architecture](#1-high-level-architecture)
 2. [Every command explained](#2-every-command-explained)
-   - 2.11 [Runtimes and providers (Claude / Ollama / OpenAI-compatible)](#211-runtimes-and-providers-claude--ollama--openai-compatible)
+   - 2.11 [Runtimes and providers (Claude / Ollama / Ollama-chat / OpenAI-compatible)](#211-runtimes-and-providers-claude--ollama--openai-compatible)
 3. [Every integrated tool explained](#3-every-integrated-tool-explained)
 4. [Prompt generation: how the system prompt is built](#4-prompt-generation-how-the-system-prompt-is-built)
 5. [End-to-end workflows](#5-end-to-end-workflows)
@@ -323,8 +323,8 @@ agent-go --task code "Fix the race condition in TaskBoardService.cs"
 | Flag | Effect |
 | --- | --- |
 | `--task` | Which task-specific agent prompt. Choices: `code`, `review`, `architecture`, `documentation`, `general`. |
-| `--runtime` | Which model runner to use. Choices: `claude` (Anthropic Claude Code, default), `ollama` (local Ollama), `openai-compatible` (Claude Code pointed at a custom `ANTHROPIC_BASE_URL`). See [§2.11](#211-runtimes-and-providers-claude--ollama--openai-compatible) for the full story. |
-| `--model` | Override the model. Default per runtime: `opus` for `claude`, `minimax-m3:cloud` for `ollama` and `openai-compatible`. Also accepts `$AGENT_MODEL` or `~/.agent-workbench/config.toml`. |
+| `--runtime` | Which model runner to use. Choices: `claude` (Anthropic Claude Code, default), `ollama` (Claude Code pointed at ollama's local OpenAI-compatible HTTP endpoint — recommended for users without an Anthropic account), `ollama-chat` (plain `ollama run <model>` REPL, opt-in), `openai-compatible` (Claude Code pointed at a custom `ANTHROPIC_BASE_URL`). See [§2.11](#211-runtimes-and-providers-claude--ollama--openai-compatible) for the full story. |
+| `--model` | Override the model. Default per runtime: `opus` for `claude`, `minimax-m3:cloud` for `ollama` / `ollama-chat` / `openai-compatible`. Also accepts `$AGENT_MODEL` or `~/.agent-workbench/config.toml`. |
 | `--base-url` | (`openai-compatible`) The Anthropic-protocol base URL (e.g. `http://localhost:1234/v1` for LM Studio). |
 | `--api-key-env` | (`openai-compatible`) Name of the env var holding the API key (e.g. `OPENAI_API_KEY`). Value is read at spawn time. |
 | `--bootstrap=LIST` | Comma-separated list of tools to install. Default: `claude,herdr,firstmate,no-mistakes,ollama`. |
@@ -491,17 +491,20 @@ agent-overnight --dry-run --task-file overnight-task.md
 
 ### 2.11 Runtimes and providers (Claude / Ollama / OpenAI-compatible)
 
-`agent-go` used to assume Claude Code was the only interactive model runner. A user without an Anthropic subscription had no documented path to a working session — they would type `agent-go --task code` and end up in a herdr pane that said `Not logged in · Run /login`. The runtime layer fixes this: there are now three first-class **runtimes** the user can pick, and the workbench detects the "Claude not logged in" case before dropping the user into a broken pane.
+`agent-go` used to assume Claude Code was the only interactive model runner. A user without an Anthropic subscription had no documented path to a working session — they would type `agent-go --task code --runtime ollama` and end up in an `ollama run` REPL with a `>>> Send a message` prompt. The runtime layer now offers **four first-class runtimes** and a clear answer for the "I have Ollama but no Anthropic login" use case: pick `--runtime ollama` and the workbench launches Claude Code pointed at Ollama's OpenAI-compatible HTTP endpoint. The same coding-agent UX, the model is local.
 
-#### The three runtimes
+#### The four runtimes
 
 | Runtime | Binary | Default model | Login required? | When to use |
 | --- | --- | --- | --- | --- |
 | `claude` | `claude` (Claude Code) | `opus` | yes | Default. Use if you have an Anthropic subscription or an `ANTHROPIC_API_KEY`. |
-| `ollama` | `ollama` | `minimax-m3:cloud` | no | Use if you want local inference. No Anthropic account required. |
+| `ollama` | `claude` (Claude Code) | `minimax-m3:cloud` | no | Claude-Code-via-ollama. Same coding-agent UX, model is local. **This is the recommended path for users without an Anthropic account.** |
+| `ollama-chat` | `ollama` | `minimax-m3:cloud` | no | Plain `ollama run <model>` chat REPL. Opt-in only — most users want `--runtime ollama` (the previous row), not this one. |
 | `openai-compatible` | `claude` (Claude Code) | `minimax-m3:cloud` | depends on provider | Use if you have a local LM Studio, vLLM, LiteLLM proxy, or any other provider that speaks the Anthropic wire protocol through `ANTHROPIC_BASE_URL`. |
 
-> **Important design point:** `minimax-m3:cloud` is no longer hardcoded as a Claude model. The default is **runtime-specific**: `opus` for `claude`, `minimax-m3:cloud` for `ollama` and `openai-compatible`. Override per command with `--model <name>`.
+> **Important design point:** `--runtime ollama` does **not** run `ollama run <model>`. It runs `claude --model <model>` with `ANTHROPIC_BASE_URL=http://localhost:11434` and `ANTHROPIC_AUTH_TOKEN=ollama` injected into the child's env, pointing Claude Code at Ollama's local OpenAI-compatible HTTP endpoint. If you specifically want the plain chat REPL, use `--runtime ollama-chat`.
+
+> **Important design point:** `minimax-m3:cloud` is no longer hardcoded as a Claude model. The default is **runtime-specific**: `opus` for `claude`, `minimax-m3:cloud` for `ollama` / `ollama-chat` / `openai-compatible`. Override per command with `--model <name>`.
 
 #### Resolution order
 
@@ -527,6 +530,7 @@ AGENT_RUNTIME=ollama agent-go --task code
 # default = "ollama"
 #
 # [ollama]
+# mode = "claude"                # "claude" (claude-via-ollama) or "chat" (REPL)
 # model = "minimax-m3:cloud"
 
 # Override the model via config
@@ -536,25 +540,69 @@ AGENT_RUNTIME=ollama agent-go --task code
 
 #### Config file: `~/.agent-workbench/config.toml`
 
-Four sections, all optional:
+Six sections, all optional:
 
 ```toml
 [runtime]
-default = "ollama"               # or "claude", "openai-compatible"
+default = "ollama"               # or "claude", "ollama-chat", "openai-compatible"
 
 [claude]
 model = "opus"                   # used when --runtime=claude and no --model
 
 [ollama]
+mode = "claude"                  # "claude" (claude-via-ollama) or "chat" (REPL)
 model = "minimax-m3:cloud"       # used when --runtime=ollama and no --model
+
+[ollama_chat]
+model = "minimax-m3:cloud"       # used when --runtime=ollama-chat and no --model
 
 [openai_compatible]
 base_url = "http://localhost:1234/v1"
 api_key_env = "OPENAI_API_KEY"   # the value of this env var is read at spawn time
 model = "minimax-m3:cloud"
+
+[backend]
+default = "herdr"                # or "treehouse", "none"
+
+[ui]
+setup = "terminal"               # or "lavish-axi"
 ```
 
 The legacy top-level `model = "..."` form is honored as a fallback for users who haven't migrated.
+
+#### Setup: `agent-go --setup`
+
+The interactive setup writes the config file for you. Run it once on a fresh machine:
+
+```bash
+agent-go --setup
+```
+
+If `lavish-axi` is on PATH, the setup defers to it (treated as
+a black box; the user saves the page in their browser and the
+workbench reads the file back). Otherwise, a short terminal
+prompt walks you through the runtime, model, mode, backend, and
+UI choices. The written file is self-documenting (commented) so
+you can read and edit it without re-running `--setup`. Existing
+files are asked before overwriting. The flow is optional — every
+flag works without it.
+
+#### Pre-launch output block
+
+Every spawn prints a 7-line pre-launch block so you can see what
+is about to run before it runs. The first three lines (runtime /
+mode / model) are printed before any spawn attempt; the rest are
+printed after a successful herdr spawn or on fallback:
+
+```
+agent-workbench: runtime:      ollama
+agent-workbench: runtime mode: claude-via-ollama
+agent-workbench: model:        minimax-m3:cloud
+agent-workbench: backend:      herdr
+agent-workbench: command:      claude --model minimax-m3:cloud
+agent-workbench: agent:        primary-2
+agent-workbench: cwd:          C:\path\to\repo
+```
 
 #### "Claude Code opened but is not logged in"
 
@@ -572,6 +620,7 @@ When you pick the `claude` runtime and the workbench cannot find any of:
 agent-workbench: Claude Code opened but is not logged in.
 Run `/login` inside Claude, or use:
   agent-go --task code --runtime ollama --model <model>
+  agent-go --task code --runtime ollama-chat --model <model>
   agent-go --task code --runtime openai-compatible --model <model> --base-url <url>
 ```
 
@@ -580,8 +629,20 @@ Run `/login` inside Claude, or use:
 | Runtime | Verify |
 | --- | --- |
 | `claude` | `claude --version` and `claude /login` (or set `ANTHROPIC_API_KEY`). |
-| `ollama` | `ollama --version` and `ollama list` (your model should appear; if not, `ollama pull <model>`). |
+| `ollama` | `claude --version` (you need Claude Code on PATH even though it talks to Ollama) and `curl http://localhost:11434/v1/models` (returns a JSON list of models Ollama is serving). |
+| `ollama-chat` | `ollama --version` and `ollama list` (your model should appear; if not, `ollama pull <model>`). |
 | `openai-compatible` | `curl <base-url>/v1/models` (LM Studio / vLLM / LiteLLM should return a JSON list of models). |
+
+#### Herdr `agent_name_taken` auto-recovery
+
+If herdr returns `agent_name_taken` (or any "is already used"
+marker) for the default `primary` agent name, the spawn retries
+automatically with `primary-2`, `primary-3`, ..., `primary-5`,
+then `primary-<6-hex>` short ids. Up to 8 attempts in
+`agent-go` / `agent-claude`, 4 per agent in `agent-fleet`. On
+exhaustion, the spawn falls back to the direct runner with a
+clear message. The 7-line pre-launch block shows the final agent
+name.
 
 #### `--backend` vs `--runtime`
 
@@ -601,8 +662,11 @@ agent-go --task code
 # Claude Code in the current shell (no herdr)
 agent-go --task code --no-herdr
 
-# Ollama locally
+# Claude-Code-via-ollama (no Anthropic login required)
 agent-go --task code --runtime ollama --model minimax-m3:cloud
+
+# Ollama chat REPL (opt-in)
+agent-go --task code --runtime ollama-chat --model minimax-m3:cloud
 
 # LM Studio at http://localhost:1234/v1
 export OPENAI_API_KEY=lm-studio
@@ -610,7 +674,7 @@ agent-go --task code --runtime openai-compatible \
          --base-url http://localhost:1234/v1 \
          --api-key-env OPENAI_API_KEY
 
-# Three agents, all running on Ollama
+# Three agents, all running on Ollama (claude-via-ollama)
 agent-fleet 3 --task code --runtime ollama --model minimax-m3:cloud
 
 # Same, but pointed at LM Studio
