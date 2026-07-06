@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -281,6 +282,59 @@ def first_executable(candidates: list[str]) -> Optional[str]:
         if resolved:
             return resolved
     return None
+
+
+# `agent-go` and friends hardcode `primary` as the herdr agent name.
+# When herdr already has an agent with that name (e.g. a previous
+# session was never cleaned up), the spawn returns non-zero with
+# `agent_name_taken` (or `is already used`) in stderr. We work
+# around this by retrying with a unique name.
+
+_UNIQUE_AGENT_NAME_MAX_PLAIN_SUFFIX = 5  # 1..4 -> base-2..base-5
+_UNIQUE_AGENT_NAME_SHORTID_LEN = 6
+
+
+def unique_agent_name(base: str, attempt: int) -> str:
+    """Return a deterministic, collision-resistant herdr agent name.
+
+    The naming scheme:
+
+        attempt 0            -> base              (the original)
+        attempt 1..4         -> base-2..base-5    (4 plain suffixes)
+        attempt >=5          -> base-<6-hex>      (uuid shortid)
+
+    `attempt` is the retry index, starting at 0 (the first try).
+    Returns `base` for attempt 0 so the happy-path name is unchanged.
+    Falls back to the shortid form for attempts beyond the plain
+    suffix range; this is effectively infinite uniqueness.
+    """
+    if attempt <= 0:
+        return base
+    if attempt <= _UNIQUE_AGENT_NAME_MAX_PLAIN_SUFFIX:
+        return f"{base}-{attempt + 1}"
+    return f"{base}-{uuid.uuid4().hex[:_UNIQUE_AGENT_NAME_SHORTID_LEN]}"
+
+
+_AGENT_NAME_TAKEN_MARKERS = (
+    "agent_name_taken",
+    "is already used",
+    "name already in use",
+    "agent name already",
+)
+
+
+def is_agent_name_taken_error(stdout: str, stderr: str) -> bool:
+    """True if herdr's output indicates the agent name was already in use.
+
+    The matching is a case-insensitive substring against a small
+    allowlist of markers. We deliberately keep this conservative —
+    a positive match triggers a retry with a new name; a non-match
+    is treated as a real failure. If herdr's error wording changes,
+    the spawn will fall back to the direct path; the user will see
+    a clear message.
+    """
+    haystack = f"{stdout}\n{stderr}".lower()
+    return any(marker in haystack for marker in _AGENT_NAME_TAKEN_MARKERS)
 
 
 # On Windows, `shutil.which(name)` returns the first PATH match, which

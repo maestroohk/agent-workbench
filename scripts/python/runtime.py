@@ -2,11 +2,19 @@
 
 The workbench was originally written with `claude` as the only
 interactive model runner. Users without Anthropic access had no
-documented path to a working session. This module introduces three
+documented path to a working session. This module introduces four
 first-class runtimes:
 
   - `claude`            — the Anthropic Claude Code CLI (default).
-  - `ollama`            — local models served by Ollama (`ollama run`).
+  - `ollama`            — Claude Code pointed at a local ollama
+    (`ANTHROPIC_BASE_URL=http://localhost:11434`). Gives the same
+    Claude-Code-style coding-agent experience, but with a local model.
+    This is the right runtime for `agent-go --task code` on a machine
+    without Anthropic access. (Previously, `--runtime ollama` invoked
+    `ollama run <model>` which gave a `>>> Send a message` chat REPL —
+    not what a coding workflow needs.)
+  - `ollama-chat`       — the plain ollama chat REPL (`ollama run`).
+    Opt-in for users who explicitly want a chat-style session.
   - `openai-compatible` — Claude Code pointed at a custom
     `ANTHROPIC_BASE_URL`, used for LM Studio, vLLM, LiteLLM, and
     any other provider that speaks the Anthropic wire protocol
@@ -15,9 +23,10 @@ first-class runtimes:
 Selection order is `CLI > env > config > default` for both the
 runtime name and the model name. The CLI flags live on `agent-go`
 (`--runtime`, `--model`, `--base-url`, `--api-key-env`); the
-config file lives at `~/.agent-workbench/config.toml` with four
-sections (`[runtime]`, `[claude]`, `[ollama]`,
-`[openai_compatible]`); the env vars are `AGENT_RUNTIME` and
+config file lives at `~/.agent-workbench/config.toml` with sections
+(`[runtime]`, `[claude]`, `[ollama]`, `[ollama_chat]`,
+`[openai_compatible]`, plus `[backend]` and `[ui]` for the
+optional setup flow); the env vars are `AGENT_RUNTIME` and
 `AGENT_MODEL`.
 
 `build_spawn_args(runtime, model, *, base_url, api_key_env)` is
@@ -48,7 +57,12 @@ from typing import Optional
 
 # --- The runtime universe ------------------------------------------------
 
-RUNTIMES: tuple[str, ...] = ("claude", "ollama", "openai-compatible")
+RUNTIMES: tuple[str, ...] = (
+    "claude",
+    "ollama",
+    "ollama-chat",
+    "openai-compatible",
+)
 
 # `claude` is the default for backwards compatibility with users
 # who already have Anthropic access. New users without a Claude
@@ -58,11 +72,13 @@ DEFAULT_RUNTIME: str = "claude"
 
 # Each runtime has its own sensible default model. `minimax-m3:cloud`
 # is no longer hard-coded as a Claude model — it is the default
-# for `ollama` and `openai-compatible`. Claude's default is the
-# Anthropic-recommended `opus` (Claude Code resolves the alias).
+# for `ollama`, `ollama-chat`, and `openai-compatible`. Claude's
+# default is the Anthropic-recommended `opus` (Claude Code resolves
+# the alias).
 DEFAULT_MODELS: dict[str, str] = {
     "claude": "opus",
     "ollama": "minimax-m3:cloud",
+    "ollama-chat": "minimax-m3:cloud",
     "openai-compatible": "minimax-m3:cloud",
 }
 
@@ -81,10 +97,16 @@ class Runtime:
     `name` is one of `RUNTIMES`. `model` is the model identifier
     passed to the runner (e.g. "opus" for claude, "minimax-m3:cloud"
     for ollama). `base_url` and `api_key_env` are populated for the
-    `openai-compatible` runtime; for the other two they are `None`.
+    `openai-compatible` runtime; for the others they are `None`.
     `source` records which layer of the resolution order supplied
     the name (`cli` / `env` / `config` / `default`) so the caller
     can show a "what was used and why" line.
+
+    `mode` is a free-form label that callers can set to record
+    *how* the runtime is being used. For the `ollama` runtime it
+    is `"claude-via-ollama"` (default) or `"chat"`. For other
+    runtimes it is `"default"`. The pre-launch output block reads
+    this field to print the `runtime mode:` line.
     """
 
     name: str
@@ -92,12 +114,16 @@ class Runtime:
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
     source: str = "default"
+    mode: str = "default"
 
     def is_claude(self) -> bool:
         return self.name == "claude"
 
     def is_ollama(self) -> bool:
         return self.name == "ollama"
+
+    def is_ollama_chat(self) -> bool:
+        return self.name == "ollama-chat"
 
     def is_openai_compatible(self) -> bool:
         return self.name == "openai-compatible"
@@ -227,8 +253,13 @@ def resolve_model(
         return cli_model, "cli"
     if env_model:
         return env_model, "env"
-    # Per-runtime config section: [claude] / [ollama] / [openai-compatible].
-    section = config.get(runtime_name) or {}
+    # Per-runtime config section: [claude] / [ollama] / [ollama_chat]
+    # / [openai-compatible]. The runtime name uses a hyphen
+    # (`openai-compatible`), but some sections use an underscore
+    # (`ollama_chat` matches the runtime `ollama-chat`). Look up
+    # both forms so the user's `[ollama_chat] model = "..."` lands
+    # in the right place.
+    section = config.get(runtime_name) or config.get(runtime_name.replace("-", "_")) or {}
     cfg_model = section.get("model")
     if cfg_model:
         return cfg_model, "config"
@@ -240,6 +271,33 @@ def resolve_model(
     if legacy_model:
         return legacy_model, "config"
     return DEFAULT_MODELS.get(runtime_name, DEFAULT_MODELS["claude"]), "default"
+
+
+def resolve_ollama_mode(config: dict) -> str:
+    """Return the resolved `[ollama] mode` for the ollama runtime.
+
+    The `ollama` runtime can run in two modes:
+      - `"claude"` (default) — Claude-Code-via-ollama. Reuses the
+        installed `claude` CLI with `ANTHROPIC_BASE_URL` pointed
+        at ollama's OpenAI-compatible HTTP endpoint. This is the
+        right mode for coding workflows.
+      - `"chat"` — plain ollama chat REPL (`ollama run <model>`).
+        Opt-in for users who explicitly want a chat-style session.
+
+    The user controls the mode via the `[ollama] mode` config key
+    (default `"claude"`). The `AGENT_OLLAMA_MODE` env var wins
+    over the config.
+
+    Returns the mode as a string. Unknown values fall back to
+    `"claude"`.
+    """
+    env_mode = os.environ.get("AGENT_OLLAMA_MODE", "").strip().lower()
+    if env_mode in ("claude", "chat"):
+        return env_mode
+    cfg_mode = ((config.get("ollama") or {}).get("mode") or "").strip().lower()
+    if cfg_mode in ("claude", "chat"):
+        return cfg_mode
+    return "claude"
 
 
 # --- Login detection -----------------------------------------------------
@@ -322,10 +380,20 @@ def build_spawn_args(
     in the caller so Windows `.cmd` shims work). `env_overrides` is
     the dict to merge into the child process's environment.
 
-    The Claude and ollama paths return an empty env-overrides dict.
-    The openai-compatible path returns `ANTHROPIC_BASE_URL` (always,
-    if `base_url` was provided) and `ANTHROPIC_AUTH_TOKEN` (only if
-    `api_key_env` is set and resolves to a non-empty value).
+    The four runtimes map to four argv/env tuples:
+
+      - `claude`            — `["claude", "--model", m]`, `{}`.
+      - `ollama`            — `["claude", "--model", m]` with
+        `ANTHROPIC_BASE_URL=http://localhost:11434` and
+        `ANTHROPIC_AUTH_TOKEN=ollama`. ollama serves
+        OpenAI-compatible HTTP at /v1 and accepts any non-empty
+        token, so the same `claude` CLI works against a local
+        ollama model. This is the "claude-via-ollama" flow.
+      - `ollama-chat`       — `["ollama", "run", m]`, `{}`. Plain
+        ollama chat REPL. Opt-in only.
+      - `openai-compatible` — `["claude", "--model", m]` with the
+        user-supplied `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
+        (read at spawn time from `api_key_env`).
 
     `base_url` and `api_key_env` arguments to this function override
     whatever is on the `Runtime`. This is how the CLI flags
@@ -334,7 +402,9 @@ def build_spawn_args(
     if runtime.is_claude():
         return _build_claude_args(runtime.model)
     if runtime.is_ollama():
-        return _build_ollama_args(runtime.model)
+        return _build_ollama_claude_args(runtime.model)
+    if runtime.is_ollama_chat():
+        return _build_ollama_chat_args(runtime.model)
     if runtime.is_openai_compatible():
         return _build_openai_compatible_args(
             runtime.model,
@@ -350,7 +420,34 @@ def _build_claude_args(model: str) -> tuple[list[str], dict[str, str]]:
     return ["claude", "--model", model], {}
 
 
-def _build_ollama_args(model: str) -> tuple[list[str], dict[str, str]]:
+def _build_ollama_claude_args(model: str) -> tuple[list[str], dict[str, str]]:
+    """Claude-Code-via-ollama: reuse the installed `claude` CLI
+    but point it at ollama's OpenAI-compatible HTTP endpoint.
+
+    ollama listens on `http://localhost:11434` by default and
+    serves OpenAI-compatible HTTP at `/v1`. It does not validate
+    the `Authorization: Bearer` token, so we set a fixed
+    non-empty placeholder (`"ollama"`). The user keeps the
+    full Claude Code agentic experience, just pointed at their
+    own local model. The same argv as the `claude` runtime is
+    returned; only the env dict differs.
+    """
+    cmd = ["claude", "--model", model]
+    env = {
+        "ANTHROPIC_BASE_URL": "http://localhost:11434",
+        "ANTHROPIC_AUTH_TOKEN": "ollama",
+    }
+    return cmd, env
+
+
+def _build_ollama_chat_args(model: str) -> tuple[list[str], dict[str, str]]:
+    """Plain ollama chat REPL: `ollama run <model>`.
+
+    Opt-in only. The default `ollama` runtime uses the
+    claude-via-ollama flow above. Users who explicitly want the
+    `>>> Send a message` REPL use `--runtime ollama-chat` (or
+    set `[runtime] default = "ollama-chat"` in their config).
+    """
     return ["ollama", "run", model], {}
 
 
@@ -386,17 +483,73 @@ def _build_openai_compatible_args(
 # --- Public helpers used by the commands --------------------------------
 
 
-def runtime_summary_lines(runtime: Runtime) -> list[str]:
-    """Return the three-line 'what is going to be used' block as
-    a list of strings. Each line is the body of an `info()` call
-    (the caller adds the `agent-workbench: ` prefix).
+def _runtime_mode_label(runtime: Runtime) -> str:
+    """Return the human-readable label for the runtime's `mode` field.
 
-    Format (matches the user's spec):
-        runtime: <name>
-        model:   <model>
-        base_url: <url>   (only for openai-compatible)
+    The pre-launch output block uses this for the `runtime mode:` line.
+
+    The mapping:
+      - `ollama` with mode `"claude"` (default)  -> "claude-via-ollama"
+      - `ollama` with mode `"chat"`              -> "chat"
+      - `ollama-chat` runtime                    -> "chat"
+      - everything else                          -> runtime.name
+
+    The `"claude-via-ollama"` label is intentional: the actual
+    command is `claude --model <m>`, not `ollama run`, so the
+    user-facing summary should not just say "claude" (which
+    would be misleading) nor just "ollama" (which hides that
+    Claude Code is the runner). The full label makes the
+    shape of the flow obvious at a glance.
     """
-    lines = [f"runtime: {runtime.name}", f"model:   {runtime.model}"]
+    if runtime.is_ollama():
+        if runtime.mode == "chat":
+            return "chat"
+        return "claude-via-ollama"
+    if runtime.is_ollama_chat():
+        return "chat"
+    return runtime.name
+
+
+def runtime_summary_lines(
+    runtime: Runtime,
+    *,
+    command: Optional[list[str]] = None,
+    agent: Optional[str] = None,
+    cwd: Optional[str] = None,
+    backend: Optional[str] = None,
+) -> list[str]:
+    """Return the 7-line "what is being used" block as a list of strings.
+
+    Each line is the body of an `info()` call (the caller adds the
+    `agent-workbench: ` prefix).
+
+    The first two lines are always present:
+        runtime:      <name>
+        runtime mode: <mode label>
+
+    Then optional lines as `command` / `agent` / `cwd` / `backend`
+    are provided:
+        model:        <model>
+        backend:      <backend>     (only if backend is given)
+        command:      <argv>        (only if command is given)
+        agent:        <name>        (only if agent is given)
+        cwd:          <path>        (only if cwd is given)
+
+    Format matches the user's spec for the refinement round.
+    """
+    lines = [
+        f"runtime:      {runtime.name}",
+        f"runtime mode: {_runtime_mode_label(runtime)}",
+        f"model:        {runtime.model}",
+    ]
     if runtime.base_url:
-        lines.append(f"base_url: {runtime.base_url}")
+        lines.append(f"base_url:     {runtime.base_url}")
+    if backend is not None:
+        lines.append(f"backend:      {backend}")
+    if command is not None:
+        lines.append(f"command:      {' '.join(command)}")
+    if agent is not None:
+        lines.append(f"agent:        {agent}")
+    if cwd is not None:
+        lines.append(f"cwd:          {cwd}")
     return lines
