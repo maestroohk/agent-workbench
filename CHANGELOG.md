@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows PowerShell shims no longer reject unknown args** (`--help`,
+  `-h`, custom flags) at the PowerShell layer. Every
+  `scripts/powershell/agent-*.ps1` is now a thin pass-through: a
+  single `[Parameter(ValueFromRemainingArguments=$true)] [string[]]$Rest`
+  captures all user args and forwards them verbatim to
+  `dispatch.py <verb> @Rest`. This eliminates the bug class where the
+  shim's hand-rolled `$forward` rebuild could inject empty `--repo`
+  (or other default-valued flag) before the user's args reached the
+  inner argparse, producing the
+  `dispatch.py: error: argument --repo: expected one argument` error
+  on `agent-go --task code`, `agent-scan --help`, etc. The inner
+  python module's argparse is now the single source of truth for
+  argument validation. Affects: `agent-go`, `agent-scan`,
+  `agent-check`, `agent-init`, `agent-bootstrap`, `agent-review`,
+  `agent-test`, `agent-claude`, `agent-fleet`, `agent-overnight`,
+  `agent`.
+- **`agent-review` (no args) preserves its legacy default of
+  `--task review --show-files`.** The shim used to inject those
+  by hand; the defaults now live in `build_prompt.py`'s argparse
+  (where they belong), so the shim's removal does not change the
+  user-facing behavior. A `--no-show-files` flag was added for the
+  inverse case.
+
 ### Added
+- **`tests/test_shim_argument_forwarding.py`** with 17 tests
+  covering the `dispatch.py -> command.main()` chain that the
+  shim now invokes. Asserts that `--help` reaches the inner
+  argparse for every verb, that `--task code`, `--repo .`,
+  `--repo <abs>`, and `--print-cmd` all work without an injected
+  empty `--repo`, and that the user's exact failing commands
+  (`agent-go --task code`, `agent-scan --help`, etc.) produce no
+  "expected one argument" error. Run with
+  `python -m pytest tests/test_shim_argument_forwarding.py -v`.
 - **`tests/` directory with three test files** (`test_path_handling.py`,
   `test_shell_profile_respect.py`, `test_tool_discovery.py`).
   Coverage: Windows path resolution (backslashes, spaces, POSIX
