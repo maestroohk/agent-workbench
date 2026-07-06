@@ -1,22 +1,32 @@
 """Implementation of the `agent-fleet` multi-agent spawner.
 
-Spawns N Claude agents in parallel, each in its own isolated context so
-they do not pollute the user's main checkout or current shell. This is
-the "multiple agents without polluting current contexts" workflow.
+Spawns N agents in parallel, each in its own isolated context so they
+do not pollute the user's main checkout or current shell. This is the
+"multiple agents without polluting current contexts" workflow.
+
+Two orthogonal axes:
+
+  - `--backend {auto,herdr,treehouse,none}` — which *orchestrator*
+    to use. `auto` picks the first one available.
+  - `--runtime {claude,ollama,openai-compatible}` — which *model
+    runner* to use. Defaults to `claude`; can be overridden via
+    `AGENT_RUNTIME`, `~/.agent-workbench/config.toml`, or
+    `--runtime`. See `scripts/python/runtime.py` for the full
+    resolution order.
 
 Backends (in order of preference):
 
 1. `herdr` (default when installed) — uses `herdr worktree create` to make
-   a fresh worktree per agent, then `herdr agent start` to launch `claude`
-   in a new pane. The herdr server keeps the agents alive in the
+   a fresh worktree per agent, then `herdr agent start` to launch the
+   model in a new pane. The herdr server keeps the agents alive in the
    background; the user can attach or `herdr agent wait` for them.
 
 2. `treehouse` (fallback when herdr is not running but treehouse is
    installed) — leases N worktrees via `treehouse get` and launches
-   `claude` in detached subprocesses on each.
+   the model in detached subprocesses on each.
 
 3. `none` (always works, no isolation) — fork-and-wait N child processes
-   that each run `claude` in the same checkout. This will pollute the
+   that each run the model in the same checkout. This will pollute the
    working tree if agents modify files, but it does not require herdr
    or treehouse to be installed.
 
@@ -45,6 +55,8 @@ from utils import (
     run_command,
 )
 
+import runtime as _runtime
+
 
 def _herdr_available() -> bool:
     return first_executable(["herdr"]) is not None
@@ -68,13 +80,19 @@ def _herdr_server_running() -> bool:
     return '"status": "running"' in result.stdout.replace(" ", "").lower() or "running" in result.stdout.lower()
 
 
-def _resolve_backend(requested: str) -> str:
-    """Pick the actual backend given the user's request and what's available."""
+def _resolve_backend(requested: str, runtime: _runtime.Runtime) -> str:
+    """Pick the actual backend given the user's request and what's available.
+
+    The ollama and openai-compatible runtimes map to `none` only when
+    herdr / treehouse are not available: herdr's `agent start` is
+    hardcoded to call the claude CLI in its own integration hook, so
+    it only makes sense with the `claude` runtime.
+    """
     if requested != "auto":
         return requested
-    if _herdr_available() and _herdr_server_running() and _claude_available():
+    if _herdr_available() and _herdr_server_running() and _claude_available() and runtime.is_claude():
         return "herdr"
-    if _treehouse_available() and _claude_available():
+    if _treehouse_available() and _claude_available() and runtime.is_claude():
         return "treehouse"
     return "none"
 
@@ -100,11 +118,30 @@ def _write_prompt(repo: Path, content: str, suffix: str) -> Path:
     return out
 
 
-def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[str], task_text: str) -> list[dict]:
-    """Spawn N herdr agents. Returns the parsed herdr worktree-create JSON for each."""
+def _spawn_herdr(
+    repo: Path,
+    n: int,
+    task: str,
+    worktree: bool,
+    runtime: _runtime.Runtime,
+    task_text: str,
+) -> list[dict]:
+    """Spawn N herdr agents. Returns the parsed herdr worktree-create JSON for each.
+
+    The herdr backend is reserved for the `claude` runtime — herdr's
+    `agent start` is hardcoded to call the claude CLI via its
+    integration hook. For other runtimes the caller routes to
+    `_spawn_treehouse` or `_spawn_none`.
+    """
     if not _herdr_available() or not _claude_available():
         return []
-    info(f"backend=herdr; spawning {n} agent(s) …")
+    info(f"backend=herdr; spawning {n} agent(s) with runtime={runtime.name} …")
+    spawn_cmd, spawn_env = _runtime.build_spawn_args(runtime)
+    runner_name = spawn_cmd[0]
+    runner_path = first_executable([runner_name])
+    if not runner_path:
+        info(f"{runner_name} executable not found; nothing to spawn")
+        return []
     spawned: list[dict] = []
     for i in range(1, n + 1):
         name = f"fleet-{i}"
@@ -153,13 +190,29 @@ def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[
             "--split", "right",
             "--no-focus",
             "--",
-            "claude",
+            runner_path,
             "--append-system-prompt",
             prompt_body,
+            "--model",
+            runtime.model,
         ]
-        if model:
-            cmd.extend(["--model", model])
-        result = run_command(cmd, cwd=repo)
+        # The openai-compatible runtime needs ANTHROPIC_BASE_URL and
+        # ANTHROPIC_AUTH_TOKEN in the child's env. The herdr server
+        # inherits its parent's env, so we merge the overrides for
+        # the duration of this call.
+        saved_env: dict[str, Optional[str]] = {}
+        if spawn_env:
+            for key, value in spawn_env.items():
+                saved_env[key] = os.environ.get(key)
+                os.environ[key] = value
+        try:
+            result = run_command(cmd, cwd=repo)
+        finally:
+            for key, old_value in saved_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
         if result.returncode != 0:
             info(f"herdr agent start failed for {name}: {result.stderr.strip()[:200]}")
             spawned.append({"name": name, "worktree": wt_path, "prompt": str(prompt_path), "rc": result.returncode})
@@ -168,11 +221,30 @@ def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[
     return spawned
 
 
-def _spawn_treehouse(repo: Path, n: int, task: str, worktree: bool, model: Optional[str], task_text: str) -> list[dict]:
-    """Spawn N treehouse-leased agents in detached subprocesses."""
-    if not _treehouse_available() or not _claude_available():
+def _spawn_treehouse(
+    repo: Path,
+    n: int,
+    task: str,
+    worktree: bool,
+    runtime: _runtime.Runtime,
+    task_text: str,
+) -> list[dict]:
+    """Spawn N treehouse-leased agents in detached subprocesses.
+
+    Same caveat as `_spawn_herdr`: treehouse worktrees pair with
+    the claude CLI by default. For non-claude runtimes we still
+    launch the resolved runner, but the user is on their own for
+    wiring treehouse's external-spawn contract.
+    """
+    if not _treehouse_available():
         return []
-    info(f"backend=treehouse; spawning {n} agent(s) …")
+    info(f"backend=treehouse; spawning {n} agent(s) with runtime={runtime.name} …")
+    spawn_cmd, spawn_env = _runtime.build_spawn_args(runtime)
+    runner_name = spawn_cmd[0]
+    runner_path = first_executable([runner_name])
+    if not runner_path:
+        info(f"{runner_name} executable not found; nothing to spawn")
+        return []
     spawned: list[dict] = []
     for i in range(1, n + 1):
         name = f"fleet-{i}"
@@ -190,15 +262,18 @@ def _spawn_treehouse(repo: Path, n: int, task: str, worktree: bool, model: Optio
         prompt_path = _write_prompt(repo, prompt, name)
         info(f"agent {i}/{n}: {name} worktree={wt_path} prompt={prompt_path}")
         prompt_body = prompt_path.read_text(encoding="utf-8")
-        cmd = ["claude", "--append-system-prompt", prompt_body]
-        if model:
-            cmd.extend(["--model", model])
+        cmd = [runner_path, "--append-system-prompt", prompt_body, "--model", runtime.model]
         # Detached: write a launcher script and start it in the background.
         launcher = repo / AGENT_DIR_NAME / f"launch-{name}.cmd"
         launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher_env_lines = ""
+        if spawn_env:
+            for key, value in spawn_env.items():
+                launcher_env_lines += f"set {key}={value}\r\n"
         launcher.write_text(
             f"@echo off\r\n"
             f"cd /d {wt_path}\r\n"
+            + launcher_env_lines
             + " ".join(f'"{a}"' for a in cmd)
             + "\r\n",
             encoding="utf-8",
@@ -208,10 +283,26 @@ def _spawn_treehouse(repo: Path, n: int, task: str, worktree: bool, model: Optio
     return spawned
 
 
-def _spawn_none(repo: Path, n: int, task: str, model: Optional[str], task_text: str) -> list[dict]:
-    """Spawn N claude processes in the same checkout. No isolation."""
-    if not _claude_available():
-        info("backend=none and claude CLI not on PATH; wrote prompts but launched no agents")
+def _spawn_none(
+    repo: Path,
+    n: int,
+    task: str,
+    runtime: _runtime.Runtime,
+    task_text: str,
+) -> list[dict]:
+    """Spawn N agents in the same checkout. No isolation.
+
+    This is the only path that works for all three runtimes
+    (claude, ollama, openai-compatible) without depending on
+    herdr or treehouse. The `openai-compatible` runtime needs
+    the env overrides applied to the spawned Popen so the
+    child process sees them.
+    """
+    spawn_cmd, spawn_env = _runtime.build_spawn_args(runtime)
+    runner_name = spawn_cmd[0]
+    runner_path = first_executable([runner_name])
+    if not runner_path:
+        info(f"backend=none and {runner_name} CLI not on PATH; wrote prompts but launched no agents")
         spawned: list[dict] = []
         for i in range(1, n + 1):
             name = f"fleet-{i}"
@@ -219,10 +310,14 @@ def _spawn_none(repo: Path, n: int, task: str, model: Optional[str], task_text: 
             if task_text:
                 prompt = prompt.rstrip() + f"\n\n## Task\n\n{task_text.strip()}\n"
             prompt_path = _write_prompt(repo, prompt, name)
-            spawned.append({"name": name, "worktree": str(repo), "prompt": str(prompt_path), "rc": 127, "error": "claude CLI not on PATH"})
+            spawned.append({"name": name, "worktree": str(repo), "prompt": str(prompt_path), "rc": 127, "error": f"{runner_name} CLI not on PATH"})
         return spawned
-    info(f"backend=none; spawning {n} agent(s) in the current checkout (no isolation) …")
+    info(f"backend=none; spawning {n} agent(s) in the current checkout (no isolation) with runtime={runtime.name} …")
     spawned = []
+    child_env = None
+    if spawn_env:
+        child_env = os.environ.copy()
+        child_env.update(spawn_env)
     for i in range(1, n + 1):
         name = f"fleet-{i}"
         prompt = _fleet_prompt(repo, task, i, n, str(repo))
@@ -230,10 +325,16 @@ def _spawn_none(repo: Path, n: int, task: str, model: Optional[str], task_text: 
             prompt = prompt.rstrip() + f"\n\n## Task\n\n{task_text.strip()}\n"
         prompt_path = _write_prompt(repo, prompt, name)
         info(f"agent {i}/{n}: {name} prompt={prompt_path}")
-        cmd = ["claude", "--append-system-prompt", f"@$(cat {prompt_path})"]
-        if model:
-            cmd.extend(["--model", model])
-        proc = subprocess.Popen(cmd, cwd=str(repo))
+        # We shell out with the resolved runner. For the openai-compatible
+        # runtime the runner is the `claude` CLI; for ollama it's `ollama`;
+        # for the claude runtime it's `claude`. The model flag is appended
+        # so each agent knows which model to use.
+        cmd = [runner_path, "--model", runtime.model]
+        if runtime.is_claude() or runtime.is_openai_compatible():
+            cmd.extend(["--append-system-prompt", prompt_path.read_text(encoding="utf-8")])
+        else:  # ollama: pass the prompt via stdin-equivalent
+            cmd.append(prompt_path.read_text(encoding="utf-8"))
+        proc = subprocess.Popen(cmd, cwd=str(repo), env=child_env)
         spawned.append({"name": name, "worktree": str(repo), "prompt": str(prompt_path), "rc": 0, "pid": proc.pid})
     return spawned
 
@@ -258,9 +359,12 @@ def _wait_herdr(spawned: list[dict], timeout_ms: int) -> int:
     return rc
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_argparser() -> argparse.ArgumentParser:
+    """Build the argparse parser for `agent-fleet`.
+
+    Extracted from `main()` so tests can drive the parser directly."""
     parser = argparse.ArgumentParser(
-        description="Spawn N Claude agents in parallel, each in an isolated context.",
+        description="Spawn N agents in parallel, each in an isolated context.",
     )
     parser.add_argument("count", type=int, help="Number of agents to spawn.")
     parser.add_argument("--repo", type=Path, default=None, help="Repository root (auto-detected).")
@@ -270,6 +374,26 @@ def main(argv: list[str] | None = None) -> int:
         default="general",
     )
     parser.add_argument("--model", default=None, help="Override the model name.")
+    parser.add_argument(
+        "--runtime",
+        choices=_runtime.RUNTIMES,
+        default=None,
+        help="Which model runner to use. claude=Anthropic Claude Code, "
+             "ollama=local Ollama, openai-compatible=Claude Code pointed at "
+             "ANTHROPIC_BASE_URL. Default: from AGENT_RUNTIME or config. "
+             "The herdr and treehouse backends require --runtime=claude.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="(openai-compatible) The Anthropic-protocol base URL "
+             "(e.g. http://localhost:1234/v1 for LM Studio).",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        help="(openai-compatible) Name of the env var holding the API key.",
+    )
     parser.add_argument(
         "--backend",
         choices=("auto", "herdr", "treehouse", "none"),
@@ -304,23 +428,52 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Optional task description appended to each agent's prompt.",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_argparser()
     args = parser.parse_args(argv)
     if args.count < 1:
         print("count must be >= 1", file=sys.stderr)
         return 2
 
     repo = (args.repo or find_repo_root()).resolve()
-    backend = _resolve_backend(args.backend)
     info(f"repo: {repo}")
+
+    # Resolve the runtime (CLI > AGENT_RUNTIME > config > default).
+    config = _runtime.load_config()
+    rt_name, _ = _runtime.resolve_runtime(
+        cli_value=args.runtime,
+        env_value=os.environ.get("AGENT_RUNTIME"),
+        config=config,
+    )
+    rt_model, _ = _runtime.resolve_model(
+        rt_name,
+        cli_model=args.model,
+        env_model=os.environ.get("AGENT_MODEL"),
+        config=config,
+    )
+    runtime = _runtime.Runtime(
+        name=rt_name,
+        model=rt_model,
+        base_url=args.base_url,
+        api_key_env=args.api_key_env,
+        source="cli-or-config",
+    )
+    for line in _runtime.runtime_summary_lines(runtime):
+        info(line)
+
+    backend = _resolve_backend(args.backend, runtime)
     info(f"backend: {backend}")
     use_worktree = args.worktree != "no" and backend != "none"
 
     if backend == "herdr":
-        spawned = _spawn_herdr(repo, args.count, args.task, use_worktree, args.model, args.task_text)
+        spawned = _spawn_herdr(repo, args.count, args.task, use_worktree, runtime, args.task_text)
     elif backend == "treehouse":
-        spawned = _spawn_treehouse(repo, args.count, args.task, use_worktree, args.model, args.task_text)
+        spawned = _spawn_treehouse(repo, args.count, args.task, use_worktree, runtime, args.task_text)
     else:
-        spawned = _spawn_none(repo, args.count, args.task, args.model, args.task_text)
+        spawned = _spawn_none(repo, args.count, args.task, runtime, args.task_text)
 
     if args.json:
         print(json.dumps(spawned, indent=2))
