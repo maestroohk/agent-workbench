@@ -51,8 +51,10 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    is_agent_name_taken_error,
     parse_json_loose,
     run_command,
+    unique_agent_name,
 )
 
 import runtime as _runtime
@@ -184,36 +186,60 @@ def _spawn_herdr(
         # --append-system-prompt. Don't shell out to `cat` — that breaks
         # on Windows where `cat` isn't on PATH inside the herdr spawn.
         prompt_body = prompt_path.read_text(encoding="utf-8")
-        cmd = [
-            "herdr", "agent", "start", name,
-            "--cwd", wt_path,
-            "--split", "right",
-            "--no-focus",
-            "--",
-            runner_path,
-            "--append-system-prompt",
-            prompt_body,
-            "--model",
-            runtime.model,
-        ]
-        # The openai-compatible runtime needs ANTHROPIC_BASE_URL and
-        # ANTHROPIC_AUTH_TOKEN in the child's env. The herdr server
-        # inherits its parent's env, so we merge the overrides for
-        # the duration of this call.
-        saved_env: dict[str, Optional[str]] = {}
-        if spawn_env:
-            for key, value in spawn_env.items():
-                saved_env[key] = os.environ.get(key)
-                os.environ[key] = value
-        try:
-            result = run_command(cmd, cwd=repo)
-        finally:
-            for key, old_value in saved_env.items():
-                if old_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old_value
-        if result.returncode != 0:
+        # Retry loop. The deterministic name `fleet-{i}` may collide
+        # across concurrent fleet invocations (or against a leftover
+        # `primary` from a previous agent-go spawn). We retry up to 4
+        # times with `unique_agent_name` before giving up.
+        MAX_AGENT_NAME_ATTEMPTS = 4
+        result = None
+        for attempt in range(MAX_AGENT_NAME_ATTEMPTS):
+            current_name = unique_agent_name(name, attempt)
+            if attempt > 0:
+                info(
+                    f"agent {i}/{n}: herdr name '{current_name}' retry "
+                    f"({attempt + 1}/{MAX_AGENT_NAME_ATTEMPTS})"
+                )
+            cmd = [
+                "herdr", "agent", "start", current_name,
+                "--cwd", wt_path,
+                "--split", "right",
+                "--no-focus",
+                "--",
+                runner_path,
+                "--append-system-prompt",
+                prompt_body,
+                "--model",
+                runtime.model,
+            ]
+            # The openai-compatible runtime needs ANTHROPIC_BASE_URL and
+            # ANTHROPIC_AUTH_TOKEN in the child's env. The herdr server
+            # inherits its parent's env, so we merge the overrides for
+            # the duration of this call.
+            saved_env: dict[str, Optional[str]] = {}
+            if spawn_env:
+                for key, value in spawn_env.items():
+                    saved_env[key] = os.environ.get(key)
+                    os.environ[key] = value
+            try:
+                result = run_command(cmd, cwd=repo)
+            finally:
+                for key, old_value in saved_env.items():
+                    if old_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old_value
+            if result.returncode == 0:
+                name = current_name
+                break
+            if is_agent_name_taken_error(result.stdout, result.stderr):
+                info(
+                    f"agent {i}/{n}: herdr name '{current_name}' already exists; "
+                    f"retrying with a unique name"
+                )
+                continue
+            # Any other failure is real.
+            break
+        if result is not None and result.returncode != 0:
             info(f"herdr agent start failed for {name}: {result.stderr.strip()[:200]}")
             spawned.append({"name": name, "worktree": wt_path, "prompt": str(prompt_path), "rc": result.returncode})
         else:

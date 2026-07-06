@@ -41,10 +41,13 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    is_agent_name_taken_error,
     parse_json_loose,
     resolve_executable,
     run_command,
+    unique_agent_name,
     workbench_root,
+    write_text,
 )
 
 import bootstrap as _bootstrap
@@ -206,6 +209,226 @@ def _ensure_path() -> None:
         os.environ["PATH"] = str(AGENT_BIN_DIR) + os.pathsep + os.environ.get("PATH", "")
 
 
+def resolve_backend(*, cli_value: Optional[str], config: dict) -> str:
+    """Resolve which orchestrator to use: `herdr` (default),
+    `treehouse`, or `none`.
+
+    Order: CLI > `[backend] default` in config > `herdr`. The
+    user can also force `none` to skip orchestration entirely.
+    Used by the pre-launch output block (the `backend:` line)
+    and by callers that need to pick a spawn path.
+    """
+    if cli_value and cli_value in ("herdr", "treehouse", "none"):
+        return cli_value
+    cfg_default = (config.get("backend") or {}).get("default", "").strip()
+    if cfg_default in ("herdr", "treehouse", "none"):
+        return cfg_default
+    return "herdr"
+
+
+def _prompt_user(question: str, *, default: str = "") -> str:
+    """Read a line from stdin, with a default. Returns the
+    stripped answer (or the default if the user just hit
+    enter). We use the built-in `input()` rather than a TUI
+    library — this is the workbench's terminal fallback for
+    the setup flow.
+    """
+    if default:
+        try:
+            response = input(f"{question} [{default}]: ")
+        except EOFError:
+            return default
+    else:
+        try:
+            response = input(f"{question}: ")
+        except EOFError:
+            return ""
+    response = response.strip()
+    return response or default
+
+
+def _yes_no(question: str, *, default_yes: bool) -> bool:
+    """Ask a yes/no question. Returns True for yes, False for no.
+    Accepts `y`, `yes`, `n`, `no` (case-insensitive). Empty
+    input returns the default."""
+    default = "Y" if default_yes else "N"
+    response = _prompt_user(question, default=default).lower()
+    if not response:
+        return default_yes
+    if response in ("y", "yes"):
+        return True
+    if response in ("n", "no"):
+        return False
+    return default_yes
+
+
+def _run_setup_interactive(config_path: Path) -> int:
+    """Interactively write `~/.agent-workbench/config.toml`.
+
+    The flow:
+
+    1. Probe for `lavish-axi`. If present and `[ui] setup =
+       "lavish-axi"`, defer to it as a black box (the user
+       saves the config in the browser; we read it back from
+       `config_path` after lavish-axi exits).
+    2. Otherwise, walk the user through four terminal
+       prompts: default runtime, model for that runtime,
+       backend default (`herdr` / `treehouse` / `none`),
+       UI default (`terminal` / `lavish-axi`).
+    3. Write the answers to `config_path` (with a clear
+       comment header so the file is self-documenting).
+       If the file already exists, ask before overwriting.
+
+    Returns 0 on success, 1 on user cancel.
+    """
+    config_path = Path(config_path).expanduser()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+    if existing:
+        info(f"existing config: {config_path}")
+        overwrite = _yes_no("overwrite? ", default_yes=False)
+        if not overwrite:
+            info("setup cancelled; existing config left as-is")
+            return 1
+    else:
+        info(f"will write: {config_path}")
+    config = _runtime.load_config(path=config_path)
+    lavish_path = resolve_executable("lavish-axi")
+    ui_pref = ((config.get("ui") or {}).get("setup") or "").strip().lower()
+    lavish_chosen = False
+    if lavish_path and (ui_pref == "lavish-axi" or not ui_pref):
+        info(f"lavish-axi found at {lavish_path}; deferring to it for the visual setup page")
+        if _yes_no("use lavish-axi for setup? ", default_yes=True):
+            lavish_chosen = True
+    if lavish_chosen:
+        # Treat lavish-axi as a black box: spawn it, let the user
+        # save the page, and read the resulting config back. We
+        # don't try to parse its output; the contract is "the
+        # user edited `~/.agent-workbench/config.toml` in the
+        # browser, we read it after they save".
+        info("opening lavish-axi setup page; save when you are done")
+        try:
+            result = subprocess.run(
+                [lavish_path, "setup", "agent-workbench"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            info("lavish-axi disappeared mid-setup; falling back to terminal prompts")
+            lavish_chosen = False
+        except subprocess.TimeoutExpired:
+            info("lavish-axi setup timed out after 5 minutes; falling back to terminal prompts")
+            lavish_chosen = False
+        else:
+            if result.returncode != 0:
+                info(f"lavish-axi setup exited {result.returncode}; falling back to terminal prompts")
+                lavish_chosen = False
+            else:
+                info("lavish-axi setup completed; reading config")
+                new_cfg = _runtime.load_config(path=config_path)
+                info(f"config: {new_cfg}")
+                return 0
+    if not lavish_chosen:
+        # Terminal prompt fallback. We walk the user through the
+        # four key choices and write the result. This is the
+        # primary path on machines without lavish-axi.
+        info("terminal setup (lavish-axi not available or not chosen)")
+        current_runtime = (config.get("runtime") or {}).get("default") or "claude"
+        runtime = _prompt_user(
+            "default runtime (claude / ollama / ollama-chat / openai-compatible)",
+            default=current_runtime,
+        ).strip().lower()
+        if runtime not in _runtime.RUNTIMES:
+            info(f"unknown runtime '{runtime}'; falling back to '{current_runtime}'")
+            runtime = current_runtime
+        model = _prompt_user(
+            f"default model for {runtime}",
+            default=_runtime.DEFAULT_MODELS.get(runtime, _runtime.DEFAULT_MODELS["claude"]),
+        ).strip()
+        if runtime == "ollama":
+            mode = _prompt_user(
+                "ollama mode (claude / chat) — claude = coding agent, chat = plain ollama REPL",
+                default="claude",
+            ).strip().lower()
+            if mode not in ("claude", "chat"):
+                mode = "claude"
+        else:
+            mode = ""
+        backend = _prompt_user(
+            "default backend (herdr / treehouse / none)",
+            default="herdr",
+        ).strip().lower()
+        if backend not in ("herdr", "treehouse", "none"):
+            backend = "herdr"
+        ui_setup = "lavish-axi" if lavish_path and _yes_no(
+            "use lavish-axi for setup pages? ", default_yes=False
+        ) else "terminal"
+        _write_setup_config(
+            config_path,
+            runtime=runtime,
+            model=model,
+            ollama_mode=mode,
+            backend=backend,
+            ui_setup=ui_setup,
+        )
+    info(f"wrote: {config_path}")
+    info("next: try `agent-go --task code --print-prompt` to verify the config")
+    if runtime == "ollama" and mode == "claude":
+        info("claude-via-ollama will be used; install ollama and `ollama pull minimax-m3:cloud` if you have not")
+    return 0
+
+
+def _write_setup_config(
+    path: Path,
+    *,
+    runtime: str,
+    model: str,
+    ollama_mode: str,
+    backend: str,
+    ui_setup: str,
+) -> None:
+    """Write a self-documenting `~/.agent-workbench/config.toml`.
+
+    Each section has a one-line comment so the user can read the
+    file and understand the choices without re-running `--setup`.
+    Quoted values are used consistently for whitespace safety.
+    """
+    lines: list[str] = [
+        "# agent-workbench configuration",
+        "# Generated by `agent-go --setup`. Safe to edit by hand.",
+        "",
+        "[runtime]",
+        f'default = "{runtime}"   # claude / ollama / ollama-chat / openai-compatible',
+        "",
+        "[claude]",
+        f'model = "{_runtime.DEFAULT_MODELS["claude"]}"',
+        "",
+        "[ollama]",
+        f'model = "{_runtime.DEFAULT_MODELS["ollama"]}"',
+    ]
+    if ollama_mode:
+        lines.append(f'mode = "{ollama_mode}"   # claude = coding agent via ollama, chat = plain ollama REPL')
+    lines.extend([
+        "",
+        "[ollama_chat]",
+        f'model = "{_runtime.DEFAULT_MODELS["ollama-chat"]}"',
+        "",
+        "[openai_compatible]",
+        'base_url = "http://localhost:1234/v1"   # LM Studio, vLLM, LiteLLM, etc.',
+        'api_key_env = "OPENAI_API_KEY"',
+        f'model = "{_runtime.DEFAULT_MODELS["openai-compatible"]}"',
+        "",
+        "[backend]",
+        f'default = "{backend}"   # herdr / treehouse / none',
+        "",
+        "[ui]",
+        f'setup = "{ui_setup}"   # lavish-axi / terminal',
+        "",
+    ])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _bootstrap_if_needed(targets: list[str], *, allow_curl: bool, assume_yes: bool) -> int:
     """Install any missing dependency. Returns 0 on success, non-zero on failure."""
     statuses = _bootstrap.check_dependencies(targets)
@@ -293,12 +516,12 @@ def _spawn_via_herdr_agent(
     """Start a herdr agent that runs the given spawn_cmd (with env_overrides).
 
     Returns the herdr invocation's returncode. The agent runs in its own
-    pane; the user can attach with `herdr agent attach primary`. If
-    `auto_attach` is True and stdout is a TTY, the function attempts to
-    run `herdr agent attach primary` as a blocking call so the user lands
-    directly in the agent's pane. Set `auto_attach=False` (or pass
-    `--no-attach` / `AGENT_GO_NO_AUTO_ATTACH=1`) to skip the attach and
-    just print the manual instruction block.
+    pane; the user can attach with `herdr agent attach <name>`. If
+    `auto_attach` is True and stdout is a TTY, the function attempts
+    to run `herdr agent attach <name>` as a blocking call so the user
+    lands directly in the agent's pane. Set `auto_attach=False` (or
+    pass `--no-attach` / `AGENT_GO_NO_AUTO_ATTACH=1`) to skip the
+    attach and just print the manual instruction block.
 
     The `spawn_cmd` is the argv of the inner runner (`claude`,
     `ollama`, etc.). The first element of `spawn_cmd` is the runner's
@@ -307,7 +530,13 @@ def _spawn_via_herdr_agent(
     hit WinError 193 on the bare npm shim. The `spawn_env` dict is
     merged into the herdr process's environment so the inner runner
     inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` for the
-    openai-compatible runtime.
+    openai-compatible and ollama (claude-via-ollama) runtimes.
+
+    If herdr returns `agent_name_taken` (the agent name `primary`
+    is already in use on the server), we retry with a unique
+    name from `utils.unique_agent_name` (`primary-2`, `primary-3`,
+    ..., `primary-<shortid>`). On exhaustion we fall back to
+    `_spawn_direct`.
     """
     herdr = resolve_executable("herdr")
     if not herdr:
@@ -363,11 +592,13 @@ def _spawn_via_herdr_agent(
     if not inner_resolved:
         info(f"{inner_name} executable not found; falling back")
         return _spawn_direct(repo, runtime, spawn_cmd, spawn_env)
-    # The ollama runtime does not understand --append-system-prompt
-    # (it is a Claude Code flag). For ollama, we drop the prompt
-    # arg and rely on .agent/SYSTEM_PROMPT.md being written; the
-    # user can paste the prompt into the pane. For claude and
-    # openai-compatible, the prompt is passed through normally.
+    # The ollama-chat runtime's runner is `ollama.exe` and does not
+    # understand --append-system-prompt (that is a Claude Code flag).
+    # We drop the prompt arg and rely on .agent/SYSTEM_PROMPT.md
+    # being written; the user can paste the prompt into the pane.
+    # The ollama (claude-via-ollama), openai-compatible, and claude
+    # runtimes all reuse the claude CLI, so they accept
+    # --append-system-prompt normally.
     if inner_name == "ollama":
         inner_argv = [inner_resolved, *spawn_cmd[1:]]
     else:
@@ -376,7 +607,7 @@ def _spawn_via_herdr_agent(
         herdr,
         "agent",
         "start",
-        "primary",
+        None,  # placeholder for the agent name; filled in below
         "--cwd",
         worktree_path,
         "--split",
@@ -387,41 +618,83 @@ def _spawn_via_herdr_agent(
     ]
     # Merge spawn_env into the herdr process's environment so the
     # inner runner inherits ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN
-    # for the openai-compatible runtime. herdr itself does not read
-    # these vars; the inner claude process does.
+    # for the openai-compatible and ollama (claude-via-ollama)
+    # runtimes. herdr itself does not read these vars; the inner
+    # claude process does.
     child_env = None
     if spawn_env:
         child_env = os.environ.copy()
         child_env.update(spawn_env)
-    info(f"starting herdr agent 'primary' in {worktree_path}")
-    # Capture stdout so we can read herdr's `agent_started` JSON envelope
-    # and verify the agent actually started in the cwd we asked for.
-    # The previous code discarded stdout and only printed a single line,
-    # which masked the "agent started in $HOME" bug.
-    result = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=child_env)
-    if result.returncode != 0:
+    # Retry loop. We try `primary`, then `primary-2`..`primary-5`,
+    # then `primary-<shortid>`. Total budget is 8 attempts. On
+    # exhaustion we fall back to direct.
+    MAX_AGENT_NAME_ATTEMPTS = 8
+    for attempt in range(MAX_AGENT_NAME_ATTEMPTS):
+        agent_name = unique_agent_name("primary", attempt)
+        cmd[3] = agent_name
+        info(f"starting herdr agent '{agent_name}' in {worktree_path}")
+        # Capture stdout so we can read herdr's `agent_started`
+        # JSON envelope and verify the agent actually started in
+        # the cwd we asked for. The previous code discarded stdout
+        # and only printed a single line, which masked the
+        # "agent started in $HOME" bug.
+        result = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=child_env)
+        if result.returncode == 0:
+            # Print the 7-line pre-launch block (command / agent /
+            # cwd / backend) so the user sees the resolved spawn
+            # shape even after a retry. The runtime / mode / model
+            # lines were already printed before the spawn attempt.
+            backend_name = "herdr"
+            extra_lines = _runtime.runtime_summary_lines(
+                runtime,
+                command=inner_argv,
+                agent=agent_name,
+                cwd=worktree_path,
+                backend=backend_name,
+            )
+            # Skip the first 3 (runtime / mode / model) since we
+            # already printed them, and any base_url line. We print
+            # everything from the 4th line onward.
+            for line in extra_lines[3:]:
+                info(line)
+            # Pull the actual cwd herdr used from the
+            # `agent_started` envelope.
+            started_payload = parse_json_loose(result.stdout)
+            actual_cwd, reported_name = _extract_agent_info(started_payload)
+            actual_cwd = actual_cwd or worktree_path
+            if reported_name:
+                agent_name = reported_name
+            # Warn if herdr's reported cwd does not match what we
+            # asked for.
+            if actual_cwd and worktree_path and _paths_differ(actual_cwd, worktree_path):
+                info(
+                    f"herdr agent started in {actual_cwd}, expected {worktree_path}; "
+                    f"the agent may be in the wrong directory"
+                )
+            _print_attach_instructions(repo=repo, worktree=worktree_path, actual_cwd=actual_cwd, agent_name=agent_name)
+            if auto_attach and _should_auto_attach():
+                return _auto_attach(herdr, agent_name)
+            return 0
+        # Non-zero exit. Check for agent_name_taken and retry.
+        if is_agent_name_taken_error(result.stdout, result.stderr):
+            info(
+                f"herdr agent '{agent_name}' already exists on the server; "
+                f"retrying with a unique name"
+            )
+            continue
+        # Any other failure is real. Surface the stderr and fall back.
         info(
             f"herdr agent start failed (exit {result.returncode}); "
             f"stderr: {result.stderr.strip()[:200] or '(empty)'}; "
             f"falling back to direct {inner_name}"
         )
         return _spawn_direct(repo, runtime, spawn_cmd, spawn_env)
-    # Pull the actual cwd herdr used from the `agent_started` envelope.
-    started_payload = parse_json_loose(result.stdout)
-    actual_cwd, agent_name = _extract_agent_info(started_payload)
-    actual_cwd = actual_cwd or worktree_path
-    if not agent_name:
-        agent_name = "primary"
-    # Warn if herdr's reported cwd does not match what we asked for.
-    if actual_cwd and worktree_path and _paths_differ(actual_cwd, worktree_path):
-        info(
-            f"herdr agent started in {actual_cwd}, expected {worktree_path}; "
-            f"the agent may be in the wrong directory"
-        )
-    _print_attach_instructions(repo=repo, worktree=worktree_path, actual_cwd=actual_cwd, agent_name=agent_name)
-    if auto_attach and _should_auto_attach():
-        return _auto_attach(herdr, agent_name)
-    return 0
+    # Retry budget exhausted — fall back to the direct path.
+    info(
+        f"could not find a unique herdr agent name after {MAX_AGENT_NAME_ATTEMPTS} attempts; "
+        f"falling back to direct {inner_name}"
+    )
+    return _spawn_direct(repo, runtime, spawn_cmd, spawn_env)
 
 
 def _spawn_direct(
@@ -520,14 +793,23 @@ def _build_argparser() -> argparse.ArgumentParser:
         choices=_runtime.RUNTIMES,
         default=None,
         help="Which model runner to use (default: from AGENT_RUNTIME or config). "
-             "claude=Anthropic Claude Code, ollama=local Ollama, "
+             "claude=Anthropic Claude Code, ollama=Claude Code via local Ollama, "
+             "ollama-chat=plain `ollama run` REPL, "
              "openai-compatible=Claude Code pointed at ANTHROPIC_BASE_URL.",
     )
     parser.add_argument(
         "--model",
         default=None,
         help="Override the model name. Default per runtime: claude=opus, "
-             "ollama=minimax-m3:cloud, openai-compatible=minimax-m3:cloud.",
+             "ollama=minimax-m3:cloud, ollama-chat=minimax-m3:cloud, "
+             "openai-compatible=minimax-m3:cloud.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("herdr", "treehouse", "none"),
+        default=None,
+        help="Which orchestrator to use (default: from [backend] default "
+             "in config, or herdr).",
     )
     parser.add_argument(
         "--base-url",
@@ -570,6 +852,14 @@ def _build_argparser() -> argparse.ArgumentParser:
              "the prompt, or to capture the prompt to a file.",
     )
     parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Interactively write ~/.agent-workbench/config.toml. "
+             "If lavish-axi is installed, defer to it; otherwise prompt "
+             "in the terminal. Safe to re-run; the existing file is "
+             "preserved unless you confirm overwrite.",
+    )
+    parser.add_argument(
         "task_text",
         nargs="?",
         default="",
@@ -581,6 +871,12 @@ def _build_argparser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_argparser()
     args = parser.parse_args(argv)
+
+    # --setup is the early-branching path: it does not need a
+    # repo, an install, or a runtime resolution. We run it before
+    # any other logic.
+    if args.setup:
+        return _run_setup_interactive(_runtime.CONFIG_PATH)
 
     # Load the workbench config up-front so both --print-prompt and
     # the runtime resolution layers see the same view of the file.
@@ -622,13 +918,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         env_model=os.environ.get("AGENT_MODEL"),
         config=config,
     )
+    # Resolve the ollama mode so the pre-launch block can surface
+    # `runtime mode: claude-via-ollama` vs `runtime mode: chat`
+    # for the ollama / ollama-chat runtimes. The mode field is
+    # informational for the summary; `build_spawn_args` is the
+    # source of truth for what the actual command does.
+    if rt_name == "ollama":
+        ollama_mode = _runtime.resolve_ollama_mode(config)
+    elif rt_name == "ollama-chat":
+        ollama_mode = "chat"
+    else:
+        ollama_mode = "default"
     runtime = _runtime.Runtime(
         name=rt_name,
         model=rt_model,
         base_url=args.base_url,
         api_key_env=args.api_key_env,
         source=rt_source,
+        mode=ollama_mode,
     )
+    # The pre-launch output block. We print the runtime / mode /
+    # model / base_url lines now; the command / agent / cwd /
+    # backend lines are filled in by the spawn function once we
+    # know the resolved spawn argv and the herdr worktree path.
     for line in _runtime.runtime_summary_lines(runtime):
         info(line)
     info(f"runtime source:  {rt_source}")

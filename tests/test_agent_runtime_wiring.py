@@ -6,12 +6,12 @@ If pytest is not installed: `pip install -r requirements-dev.txt`.
 
 Background. `agent-claude` and `agent-fleet` were wired into the
 new runtime/provider layer in commit 2. Both commands now accept
-`--runtime {claude,ollama,openai-compatible}` and route the
-spawn argv / env through `_runtime.build_spawn_args()`. The
-herdr and treehouse backends are still claude-only (herdr's
+`--runtime {claude,ollama,ollama-chat,openai-compatible}` and
+route the spawn argv / env through `_runtime.build_spawn_args()`.
+The herdr and treehouse backends are still claude-only (herdr's
 `agent start` is hardcoded to call the claude CLI via its
-integration hook); the openai-compatible and ollama runtimes
-route to direct spawn.
+integration hook); the openai-compatible, ollama, and ollama-chat
+runtimes route to direct spawn.
 
 These tests pin down:
 
@@ -21,11 +21,16 @@ These tests pin down:
   - `agent_fleet._resolve_backend` falls back to `none` when the
     requested backend is unavailable (e.g. `--runtime ollama`
     cannot use herdr).
-  - The spawn argv for the `ollama` runtime contains `ollama run`
-    and the model name; the spawn argv for the `claude` and
-    `openai-compatible` runtimes contains `--model <model>`.
-  - The `openai-compatible` runtime injects `ANTHROPIC_BASE_URL`
-    and `ANTHROPIC_AUTH_TOKEN` into the child's env.
+  - The spawn argv for the `ollama` runtime contains `claude
+    --model <model>` plus the ollama env overrides (Claude-Code-
+    via-ollama). The spawn argv for the `ollama-chat` runtime
+    contains `ollama run` and the model name. The spawn argv for
+    the `claude` and `openai-compatible` runtimes contains
+    `claude --model <model>`.
+  - The `ollama` and `openai-compatible` runtimes inject
+    `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` into the
+    child's env. The `ollama-chat` runtime does not (it is plain
+    `ollama run`).
 """
 from __future__ import annotations
 
@@ -44,6 +49,7 @@ if str(_PYTHON_SRC) not in sys.path:
 
 import agent_claude  # noqa: E402
 import agent_fleet  # noqa: E402
+import agent_go  # noqa: E402
 import runtime as _runtime  # noqa: E402
 from runtime import Runtime, build_spawn_args  # noqa: E402
 
@@ -197,13 +203,16 @@ class TestAgentClaudeSpawnPaths:
     env to subprocess.run. We assert by intercepting
     `subprocess.run` / `run_command` and inspecting both."""
 
-    def test_ollama_runtime_uses_ollama_run(
+    def test_ollama_runtime_uses_claude_via_ollama(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """`agent-claude --runtime ollama` -> `ollama run <model>`."""
-        # Drop a fake ollama binary on PATH.
-        fake = tmp_path / "ollama.exe"
-        fake.write_bytes(b"MZ\x00")
+        """`agent-claude --runtime ollama` -> `claude --model <m>`
+        with the ollama OpenAI-compatible env. The plain
+        `ollama run` lives under `--runtime ollama-chat`."""
+        # Drop a fake claude binary on PATH.
+        fake = tmp_path / "claude.cmd"
+        fake.write_text("@echo off\r\n")
+        monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
 
         captured: list = []
 
@@ -217,12 +226,47 @@ class TestAgentClaudeSpawnPaths:
         runtime = _runtime.Runtime(name="ollama", model="minimax-m3:cloud", source="test")
         rc = agent_claude._spawn_claude(tmp_path, runtime)
         assert rc == 0
+        # The argv contains the resolved claude path and the model.
+        assert len(captured) == 1
+        argv, kwargs = captured[0]
+        assert "claude" in argv[0]
+        assert "--model" in argv
+        assert "minimax-m3:cloud" in argv
+        # The ollama env overrides are injected.
+        env = kwargs.get("env") or {}
+        assert env.get("ANTHROPIC_BASE_URL") == "http://localhost:11434"
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == "ollama"
+
+    def test_ollama_chat_runtime_uses_ollama_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`agent-claude --runtime ollama-chat` -> `ollama run <model>`."""
+        # Drop a fake ollama binary on PATH.
+        fake = tmp_path / "ollama.exe"
+        fake.write_bytes(b"MZ\x00")
+        monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+
+        captured: list = []
+
+        def _fake_run(argv, **kwargs):  # noqa: ANN001
+            captured.append((list(argv), kwargs))
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("agent_claude.run_command", _fake_run)
+        runtime = _runtime.Runtime(name="ollama-chat", model="minimax-m3:cloud", source="test")
+        rc = agent_claude._spawn_claude(tmp_path, runtime)
+        assert rc == 0
         # The argv contains the resolved ollama path and `run <model>`.
         assert len(captured) == 1
         argv, kwargs = captured[0]
         assert "ollama" in argv[0]
         assert "run" in argv
         assert "minimax-m3:cloud" in argv
+        # No env overrides for the chat runtime.
+        env = kwargs.get("env")
+        assert env is None or env == {}
 
     def test_claude_runtime_uses_claude(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -385,11 +429,14 @@ class TestAgentFleetSpawnNone:
     all three runtimes (no herdr / treehouse dependency). It
     uses `subprocess.Popen` with the env overrides."""
 
-    def test_ollama_runtime_spawns_ollama(
+    def test_ollama_runtime_spawns_claude_via_ollama(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        fake = tmp_path / "ollama.exe"
-        fake.write_bytes(b"MZ\x00")
+        """`agent-fleet --runtime ollama` -> `claude --model <m>`
+        with the ollama OpenAI-compatible env. Same shape as
+        `agent-claude`."""
+        fake = tmp_path / "claude.cmd"
+        fake.write_text("@echo off\r\n")
         monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
         captured: list = []
 
@@ -403,12 +450,14 @@ class TestAgentFleetSpawnNone:
         spawned = agent_fleet._spawn_none(tmp_path, 1, "code", runtime, "")
         assert len(spawned) == 1
         argv, kwargs = captured[0]
-        # The resolved ollama path is argv[0].
-        assert "ollama" in argv[0]
+        # The resolved claude path is argv[0].
+        assert "claude" in argv[0]
         assert "--model" in argv
         assert "minimax-m3:cloud" in argv
-        # No env overrides for ollama.
-        assert kwargs.get("env") is None
+        # The ollama env overrides are injected.
+        env = kwargs.get("env") or {}
+        assert env.get("ANTHROPIC_BASE_URL") == "http://localhost:11434"
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == "ollama"
 
     def test_openai_compatible_runtime_injects_env(
         self,
@@ -459,6 +508,146 @@ class TestAgentFleetSpawnNone:
 
 
 # ---------------------------------------------------------------------------
+# agent-claude / agent-fleet herdr agent_name_taken retry
+# ---------------------------------------------------------------------------
+
+
+class TestAgentClaudeAndFleetHerdrRetry:
+    """`agent-claude` and `agent-fleet` retry on
+    `herdr agent_name_taken` (defensive: an earlier
+    agent-go session may have left a stale `primary`
+    on the server)."""
+
+    def _make_run_command_fake(
+        self, agent_start_attempts_to_fail: dict[int, str]
+    ):
+        """Return a fake `run_command` (and a list of all
+        `herdr agent start` argv sequences) that fails
+        the given `agent start` attempts with the
+        `agent_name_taken` marker, and succeeds for the
+        rest. Worktree-create calls always succeed.
+        """
+        agent_start_count: list[int] = [0]
+        calls: list[list[str]] = []
+
+        def _fake_run_command(argv, **kwargs):  # noqa: ANN001
+            calls.append(list(argv))
+            if "agent" in argv and "start" in argv:
+                agent_name = argv[3] if len(argv) > 3 else "?"
+                attempt_idx = agent_start_count[0]
+                agent_start_count[0] += 1
+                if attempt_idx in agent_start_attempts_to_fail:
+                    return subprocess.CompletedProcess(
+                        args=argv,
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            f"error: {agent_start_attempts_to_fail[attempt_idx]}: "
+                            f"{agent_name} is already used"
+                        ),
+                    )
+                return subprocess.CompletedProcess(
+                    args=argv, returncode=0, stdout="", stderr=""
+                )
+            # Worktree create: succeed.
+            if "worktree" in argv and "create" in argv:
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=0,
+                    stdout='{"worktree_created":{}}',
+                    stderr="",
+                )
+            # Integration install: succeed.
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="installed", stderr=""
+            )
+
+        return _fake_run_command, calls
+
+    def test_agent_claude_retries_with_unique_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`agent-claude`'s herdr spawn retries `primary` ->
+        `primary-2` -> `primary-3` on `agent_name_taken`."""
+        fake, calls = self._make_run_command_fake(
+            {0: "agent_name_taken", 1: "agent_name_taken"}
+        )
+        monkeypatch.setattr(agent_claude, "run_command", fake)
+        # Make herdr + claude available so we don't take the
+        # missing-binary fallback.
+        claude_path = tmp_path / "claude.cmd"
+        claude_path.write_text("@echo off\r\n")
+        herdr_path = tmp_path / "herdr.cmd"
+        herdr_path.write_text("@echo off\r\n")
+
+        def _resolve(name: str) -> str | None:
+            if name == "claude":
+                return str(claude_path)
+            if name == "herdr":
+                return str(herdr_path)
+            return None
+
+        monkeypatch.setattr(agent_claude, "resolve_executable", _resolve)
+        # A real .agent dir to hold the prompt.
+        agent_dir = tmp_path / ".agent"
+        agent_dir.mkdir(exist_ok=True)
+        prompt_path = agent_dir / "SYSTEM_PROMPT.md"
+        prompt_path.write_text("test prompt body", encoding="utf-8")
+        runtime = Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        rc = agent_claude._spawn_herdr_agent(
+            tmp_path, prompt_path, runtime, agent_name="primary"
+        )
+        assert rc == 0
+        agent_calls = [a for a in calls if "agent" in a and "start" in a]
+        assert len(agent_calls) == 3
+        assert agent_calls[0][3] == "primary"
+        assert agent_calls[1][3] == "primary-2"
+        assert agent_calls[2][3] == "primary-3"
+
+    def test_agent_fleet_retries_with_unique_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`agent-fleet` retries the per-agent name on
+        `agent_name_taken` for a single fleet invocation."""
+        fake, calls = self._make_run_command_fake(
+            {0: "agent_name_taken"}
+        )
+        monkeypatch.setattr(agent_fleet, "run_command", fake)
+        claude_path = tmp_path / "claude.cmd"
+        claude_path.write_text("@echo off\r\n")
+        herdr_path = tmp_path / "herdr.cmd"
+        herdr_path.write_text("@echo off\r\n")
+
+        def _resolve(names: list[str]) -> str | None:
+            for n in names:
+                if n == "claude":
+                    return str(claude_path)
+                if n == "herdr":
+                    return str(herdr_path)
+            return None
+
+        monkeypatch.setattr(agent_fleet, "first_executable", _resolve)
+        monkeypatch.setattr(agent_fleet, "_herdr_available", lambda: True)
+        monkeypatch.setattr(agent_fleet, "_claude_available", lambda: True)
+        runtime = Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        # Spawn a single agent (`n=1`) to keep the assertions tight.
+        # Use worktree=False to skip the worktree-create branch.
+        spawned = agent_fleet._spawn_herdr(
+            tmp_path, 1, "code", False, runtime, ""
+        )
+        assert len(spawned) == 1
+        assert spawned[0]["rc"] == 0
+        # The agent's name should be `fleet-1-2` (the retry) since
+        # `fleet-1` was taken.
+        assert spawned[0]["name"] == "fleet-1-2"
+        agent_calls = [a for a in calls if "agent" in a and "start" in a]
+        assert len(agent_calls) == 2
+        assert agent_calls[0][3] == "fleet-1"
+        assert agent_calls[1][3] == "fleet-1-2"
+
+
+
+# ---------------------------------------------------------------------------
 # run_command accepts env=
 # ---------------------------------------------------------------------------
 
@@ -500,3 +689,294 @@ class TestRunCommandEnv:
         # No `env` kwarg was passed to run_command, so subprocess.run
         # sees no override and inherits the parent env.
         assert "env" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# agent-go herdr agent_name_taken retry
+# ---------------------------------------------------------------------------
+
+
+class TestAgentGoHerdrRetry:
+    """`agent-go`'s herdr spawn retries with a unique name on
+    `agent_name_taken`. We mock `subprocess.run` to simulate
+    herdr's behaviour and assert the retry path uses the
+    right names."""
+
+    def _make_herdr_fake(self, agent_start_attempts_to_fail: dict[int, str]):
+        """Return a fake `subprocess.run` that fails with
+        `agent_name_taken: <name> is already used` for the
+        given `agent start` attempt indices, and succeeds
+        for the rest. Worktree-create calls always succeed
+        (we don't care about the worktree path in these
+        tests; we just want the agent-name retry path)."""
+        agent_start_count: list[int] = [0]
+
+        def _fake_run(argv, **kwargs):  # noqa: ANN001
+            # Only the `agent start` subcommand takes an agent
+            # name. We treat the worktree create call as always
+            # succeeding with a JSON envelope that has no path,
+            # which makes _spawn_via_herdr_agent fall back to
+            # `str(repo)` for worktree_path.
+            if "agent" in argv and "start" in argv:
+                agent_name = argv[3] if len(argv) > 3 else "?"
+                attempt_idx = agent_start_count[0]
+                agent_start_count[0] += 1
+                if attempt_idx in agent_start_attempts_to_fail:
+                    return subprocess.CompletedProcess(
+                        args=argv,
+                        returncode=1,
+                        stdout="",
+                        stderr=(
+                            f"error: {agent_start_attempts_to_fail[attempt_idx]}: "
+                            f"{agent_name} is already used"
+                        ),
+                    )
+                # Success: emit a `agent_started` JSON envelope.
+                payload = (
+                    '{"agent_started":{"agent":"' + agent_name + '",'
+                    '"cwd":"C:\\\\repo","argv":[]}}'
+                )
+                return subprocess.CompletedProcess(
+                    args=argv, returncode=0, stdout=payload, stderr=""
+                )
+            # Worktree create: succeed with a JSON envelope that
+            # has no path so the function falls back to `str(repo)`.
+            if "worktree" in argv and "create" in argv:
+                payload = '{"worktree_created":{}}'
+                return subprocess.CompletedProcess(
+                    args=argv, returncode=0, stdout=payload, stderr=""
+                )
+            # Any other call (e.g. _auto_attach or _spawn_direct):
+            # succeed.
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="", stderr=""
+            )
+
+        return _fake_run
+
+    def test_retries_with_unique_name_on_collision(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """First two attempts hit `agent_name_taken`; the third
+        succeeds. The function should use `primary`, `primary-2`,
+        and `primary-3` for the three attempts, then return 0."""
+        fake = self._make_herdr_fake({0: "agent_name_taken", 1: "agent_name_taken"})
+        # Track every `agent start` call.
+        agent_calls: list = []
+        original = fake
+
+        def _tracker(argv, **kwargs):  # noqa: ANN001
+            if "agent" in argv and "start" in argv:
+                agent_calls.append(list(argv))
+            return original(argv, **kwargs)
+
+        monkeypatch.setattr("agent_go.subprocess.run", _tracker)
+        claude_path = tmp_path / "claude.cmd"
+        claude_path.write_text("@echo off\r\n")
+        herdr_path = tmp_path / "herdr.cmd"
+        herdr_path.write_text("@echo off\r\n")
+
+        def _resolve(name: str) -> str | None:
+            if name == "claude":
+                return str(claude_path)
+            if name == "herdr":
+                return str(herdr_path)
+            return None
+
+        monkeypatch.setattr("agent_go.resolve_executable", _resolve)
+        runtime = _runtime.Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        spawn_cmd = ["claude", "--model", "minimax-m3:cloud"]
+        spawn_env: dict = {}
+        prompt = "test prompt body"
+        rc = agent_go._spawn_via_herdr_agent(
+            tmp_path, prompt, runtime, spawn_cmd, spawn_env, auto_attach=False
+        )
+        assert rc == 0
+        # Three herdr `agent start` calls.
+        assert len(agent_calls) == 3
+        assert agent_calls[0][3] == "primary"
+        assert agent_calls[1][3] == "primary-2"
+        assert agent_calls[2][3] == "primary-3"
+
+    def test_exhausts_retries_falls_back_to_direct(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """All 8 attempts fail with `agent_name_taken`; the
+        function should fall back to `_spawn_direct`."""
+        fake = self._make_herdr_fake({i: "agent_name_taken" for i in range(20)})
+        agent_calls: list = []
+        direct_calls: list = []
+
+        def _tracker(argv, **kwargs):  # noqa: ANN001
+            if "agent" in argv and "start" in argv:
+                agent_calls.append(list(argv))
+            else:
+                direct_calls.append(list(argv))
+            return fake(argv, **kwargs)
+
+        monkeypatch.setattr("agent_go.subprocess.run", _tracker)
+        claude_path = tmp_path / "claude.cmd"
+        claude_path.write_text("@echo off\r\n")
+        herdr_path = tmp_path / "herdr.cmd"
+        herdr_path.write_text("@echo off\r\n")
+
+        def _resolve(name: str) -> str | None:
+            if name == "claude":
+                return str(claude_path)
+            if name == "herdr":
+                return str(herdr_path)
+            return None
+
+        monkeypatch.setattr("agent_go.resolve_executable", _resolve)
+        runtime = _runtime.Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        spawn_cmd = ["claude", "--model", "minimax-m3:cloud"]
+        spawn_env: dict = {}
+        prompt = "test prompt body"
+        rc = agent_go._spawn_via_herdr_agent(
+            tmp_path, prompt, runtime, spawn_cmd, spawn_env, auto_attach=False
+        )
+        # We made 8 herdr attempts then fell back to direct. The
+        # rc is whatever direct returned (0 in our fake).
+        assert rc == 0
+        # 8 herdr `agent start` calls.
+        assert len(agent_calls) == 8
+        # The 8 names should be primary, primary-2, ..., primary-5,
+        # then 3 shortid names.
+        assert agent_calls[0][3] == "primary"
+        assert agent_calls[1][3] == "primary-2"
+        assert agent_calls[4][3] == "primary-5"
+
+
+# ---------------------------------------------------------------------------
+# agent-go pre-launch output block
+# ---------------------------------------------------------------------------
+
+
+class TestAgentGoPrelaunchOutput:
+    """The pre-launch output block must show the resolved
+    runtime / mode / model / base_url / backend / command /
+    agent / cwd in the documented order. The first three
+    lines (runtime / mode / model) are printed before the
+    spawn; the rest are printed after a successful herdr
+    spawn."""
+
+    def test_print_prompt_includes_seven_line_block(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """`--print-prompt` resolves runtime + model + mode
+        and prints the pre-launch block at the top."""
+        rc = agent_go.main([
+            "--print-prompt",
+            "--no-bootstrap",
+            "--runtime", "ollama",
+            "--model", "minimax-m3:cloud",
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        err = captured.err
+        assert "agent-workbench: runtime:      ollama" in err
+        assert "agent-workbench: runtime mode: claude-via-ollama" in err
+        assert "agent-workbench: model:        minimax-m3:cloud" in err
+        # The prompt body is on stdout.
+        assert "Global toolkit instructions" in captured.out
+
+    def test_ollama_runtime_command_is_claude_with_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`--runtime ollama` builds a `claude --model <m>`
+        command and injects the ollama env into the child.
+        Asserted by inspecting `build_spawn_args`."""
+        runtime = _runtime.Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        cmd, env = _runtime.build_spawn_args(runtime)
+        assert cmd == ["claude", "--model", "minimax-m3:cloud"]
+        assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+
+    def test_ollama_chat_runtime_command_is_ollama_run(self) -> None:
+        """`--runtime ollama-chat` builds the plain `ollama run`
+        command with no env overrides."""
+        runtime = _runtime.Runtime(name="ollama-chat", model="minimax-m3:cloud", source="test")
+        cmd, env = _runtime.build_spawn_args(runtime)
+        assert cmd == ["ollama", "run", "minimax-m3:cloud"]
+        assert env == {}
+
+
+# ---------------------------------------------------------------------------
+# agent-go setup flow
+# ---------------------------------------------------------------------------
+
+
+class TestAgentGoSetup:
+    """`agent-go --setup` writes a valid config. We test the
+    terminal-prompt path (lavish-axi absent) by feeding stdin
+    and asserting the resulting file parses back."""
+
+    def test_setup_writes_valid_config(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Drive the terminal prompt path with a fixed
+        sequence of answers. The resulting config file at
+        the test path must parse back via `load_config`
+        and contain the user's choices."""
+        config_path = tmp_path / "config.toml"
+        # Sequence of answers for the prompts:
+        # 1. default runtime: ollama
+        # 2. model: minimax-m3:cloud (just hit enter)
+        # 3. ollama mode: claude
+        # 4. backend: herdr
+        # 5. lavish-axi for setup? n
+        answers = iter(["ollama\n", "\n", "claude\n", "herdr\n", "n\n"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        # lavish-axi is not on PATH -> terminal prompts.
+        monkeypatch.setattr("agent_go.resolve_executable", lambda name: None)
+        rc = agent_go._run_setup_interactive(config_path)
+        assert rc == 0
+        # The file exists and is parseable.
+        assert config_path.is_file()
+        cfg = _runtime.load_config(path=config_path)
+        assert cfg["runtime"]["default"] == "ollama"
+        assert cfg["ollama"]["mode"] == "claude"
+        assert cfg["backend"]["default"] == "herdr"
+        assert cfg["ui"]["setup"] == "terminal"
+
+    def test_setup_respects_existing_file_overwrite(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If the file exists and the user says 'no' to
+        overwrite, the setup returns 1 and the file is
+        unchanged."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("# existing content\n[runtime]\ndefault = \"claude\"\n", encoding="utf-8")
+        # The "overwrite?" prompt gets a 'n'.
+        answers = iter(["n\n"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        monkeypatch.setattr("agent_go.resolve_executable", lambda name: None)
+        rc = agent_go._run_setup_interactive(config_path)
+        assert rc == 1
+        # The file is unchanged.
+        assert config_path.read_text(encoding="utf-8").startswith("# existing content")
+
+    def test_setup_argparse_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--setup` parses on the agent-go argparser."""
+        parser = agent_go._build_argparser()
+        args = parser.parse_args(["--setup"])
+        assert args.setup is True
+
+    def test_setup_writes_self_documenting_comments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The written file includes comments so the user can
+        read it and understand the choices without re-running
+        `--setup`."""
+        config_path = tmp_path / "config.toml"
+        answers = iter(["claude\n", "\n", "herdr\n", "n\n"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        monkeypatch.setattr("agent_go.resolve_executable", lambda name: None)
+        agent_go._run_setup_interactive(config_path)
+        text = config_path.read_text(encoding="utf-8")
+        assert "agent-workbench configuration" in text
+        assert "[runtime]" in text
+        assert "[backend]" in text
+        assert "[ui]" in text

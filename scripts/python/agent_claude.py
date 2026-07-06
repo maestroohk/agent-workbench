@@ -51,9 +51,11 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    is_agent_name_taken_error,
     parse_json_loose,
     resolve_executable,
     run_command,
+    unique_agent_name,
     workbench_root,
 )
 
@@ -253,19 +255,56 @@ def _spawn_herdr_agent(
         for key, value in spawn_env.items():
             saved_env[key] = os.environ.get(key)
             os.environ[key] = value
-    try:
-        result = run_command(cmd, cwd=repo)
-    finally:
-        for key, old_value in saved_env.items():
-            if old_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = old_value
-    if result.returncode != 0:
-        info(
-            f"herdr agent start failed (exit {result.returncode}); "
-            f"falling back to direct claude"
-        )
+    # Retry loop. If the requested agent name is already in use on
+    # the herdr server, try the next unique name (`primary-2`,
+    # `primary-3`, ...). On exhaustion fall back to the direct
+    # runner. We reuse the same retry helpers as `agent-go`.
+    MAX_AGENT_NAME_ATTEMPTS = 8
+    result = None
+    for attempt in range(MAX_AGENT_NAME_ATTEMPTS):
+        current_name = unique_agent_name(agent_name, attempt)
+        cmd[3] = current_name
+        if attempt > 0:
+            info(
+                f"herdr agent '{current_name}' retry "
+                f"({attempt + 1}/{MAX_AGENT_NAME_ATTEMPTS})"
+            )
+        try:
+            result = run_command(cmd, cwd=repo)
+        finally:
+            # Note: the saved_env teardown happens once after
+            # the whole loop, not per attempt. We do that below
+            # by leaving the loop and falling through to the
+            # teardown block that follows.
+            pass
+        if result.returncode == 0:
+            agent_name = current_name
+            break
+        if is_agent_name_taken_error(result.stdout, result.stderr):
+            info(
+                f"herdr agent '{current_name}' already exists on the server; "
+                f"retrying with a unique name"
+            )
+            continue
+        # Any other failure is real. Fall through to fallback.
+        break
+    # Tear down saved_env whether we succeeded or fell back.
+    for key, old_value in saved_env.items():
+        if old_value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old_value
+    if result is not None and result.returncode != 0:
+        if is_agent_name_taken_error(result.stdout, result.stderr):
+            info(
+                f"could not find a unique herdr agent name after {MAX_AGENT_NAME_ATTEMPTS} attempts; "
+                f"falling back to direct claude"
+            )
+        else:
+            info(
+                f"herdr agent start failed (exit {result.returncode}); "
+                f"falling back to direct claude"
+            )
         return _spawn_claude(repo, runtime)
     info(f"herdr agent '{agent_name}' started in {worktree_path}")
     return result.returncode

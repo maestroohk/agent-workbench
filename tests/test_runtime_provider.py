@@ -64,6 +64,7 @@ from runtime import (  # noqa: E402
     claude_missing_login_message,
     load_config,
     resolve_model,
+    resolve_ollama_mode,
     resolve_runtime,
     runtime_summary_lines,
 )
@@ -162,6 +163,7 @@ class TestResolveModel:
         model; Claude defaults to `opus`."""
         assert DEFAULT_MODELS["claude"] == "opus"
         assert DEFAULT_MODELS["ollama"] == "minimax-m3:cloud"
+        assert DEFAULT_MODELS["ollama-chat"] == "minimax-m3:cloud"
         assert DEFAULT_MODELS["openai-compatible"] == "minimax-m3:cloud"
 
     def test_default_for_claude(self) -> None:
@@ -177,6 +179,76 @@ class TestResolveModel:
         )
         assert model == "minimax-m3:cloud"
         assert source == "default"
+
+    def test_default_for_ollama_chat(self) -> None:
+        model, source = resolve_model(
+            "ollama-chat", cli_model=None, env_model=None, config={}
+        )
+        assert model == "minimax-m3:cloud"
+        assert source == "default"
+
+    def test_ollama_chat_uses_ollama_chat_section(self) -> None:
+        """When runtime is `ollama-chat`, the model comes from
+        `[ollama_chat].model` (a separate config section so the
+        user can pick a chat-tuned model independently of the
+        coding-agent model in `[ollama].model`)."""
+        model, source = resolve_model(
+            "ollama-chat",
+            cli_model=None,
+            env_model=None,
+            config={"ollama_chat": {"model": "llama3.2:3b"}},
+        )
+        assert model == "llama3.2:3b"
+        assert source == "config"
+
+
+# ---------------------------------------------------------------------------
+# resolve_ollama_mode
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOllamaMode:
+    """`resolve_ollama_mode` reads `[ollama] mode` (or the
+    `AGENT_OLLAMA_MODE` env var) and returns either `"claude"`
+    (default) or `"chat"`. This is the switch between
+    claude-via-ollama and plain ollama chat REPL."""
+
+    def test_default_is_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AGENT_OLLAMA_MODE", raising=False)
+        assert resolve_ollama_mode({}) == "claude"
+        assert resolve_ollama_mode({"ollama": {}}) == "claude"
+
+    def test_config_mode_chat(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AGENT_OLLAMA_MODE", raising=False)
+        cfg = {"ollama": {"mode": "chat"}}
+        assert resolve_ollama_mode(cfg) == "chat"
+
+    def test_config_mode_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AGENT_OLLAMA_MODE", raising=False)
+        cfg = {"ollama": {"mode": "claude"}}
+        assert resolve_ollama_mode(cfg) == "claude"
+
+    def test_env_var_wins_over_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AGENT_OLLAMA_MODE", "chat")
+        cfg = {"ollama": {"mode": "claude"}}
+        assert resolve_ollama_mode(cfg) == "chat"
+
+    def test_unknown_value_falls_back_to_claude(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo in `[ollama] mode` is treated as the default
+        (`"claude"`) so the user is never silently routed to
+        a different flow than the one they thought they picked."""
+        monkeypatch.delenv("AGENT_OLLAMA_MODE", raising=False)
+        cfg = {"ollama": {"mode": "definitely-not-a-real-mode"}}
+        assert resolve_ollama_mode(cfg) == "claude"
+
+    def test_empty_string_falls_back_to_claude(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AGENT_OLLAMA_MODE", raising=False)
+        cfg = {"ollama": {"mode": ""}}
+        assert resolve_ollama_mode(cfg) == "claude"
 
     def test_default_for_openai_compatible(self) -> None:
         model, source = resolve_model(
@@ -272,22 +344,85 @@ class TestLoadConfig:
             'model = "opus"\n'
             "\n"
             "[ollama]\n"
+            'mode = "claude"\n'
             'model = "minimax-m3:cloud"\n'
+            "\n"
+            "[ollama_chat]\n"
+            'model = "llama3.2:3b"\n'
             "\n"
             "[openai_compatible]\n"
             'base_url = "http://localhost:1234/v1"\n'
             'api_key_env = "OPENAI_API_KEY"\n'
             'model = "minimax-m3:cloud"\n'
+            "\n"
+            "[backend]\n"
+            'default = "herdr"\n'
+            "\n"
+            "[ui]\n"
+            'setup = "lavish-axi"\n'
         )
         cfg = load_config(path=p)
         assert cfg["runtime"] == {"default": "ollama"}
         assert cfg["claude"] == {"model": "opus"}
-        assert cfg["ollama"] == {"model": "minimax-m3:cloud"}
+        assert cfg["ollama"] == {"mode": "claude", "model": "minimax-m3:cloud"}
+        assert cfg["ollama_chat"] == {"model": "llama3.2:3b"}
         assert cfg["openai-compatible"] == {
             "base_url": "http://localhost:1234/v1",
             "api_key_env": "OPENAI_API_KEY",
             "model": "minimax-m3:cloud",
         }
+        assert cfg["backend"] == {"default": "herdr"}
+        assert cfg["ui"] == {"setup": "lavish-axi"}
+
+    def test_parses_ollama_chat_section(self, tmp_path: Path) -> None:
+        """`[ollama_chat] model = "x"` lands in
+        `config["ollama_chat"]["model"]` so the ollama-chat
+        runtime can read its own default model."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[ollama_chat]\n"
+            'model = "llama3.2:3b"\n'
+        )
+        cfg = load_config(path=p)
+        assert cfg["ollama_chat"] == {"model": "llama3.2:3b"}
+
+    def test_parses_backend_section(self, tmp_path: Path) -> None:
+        """`[backend] default = "herdr"` lands in
+        `config["backend"]["default"]` so the setup flow can
+        read it."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[backend]\n"
+            'default = "herdr"\n'
+        )
+        cfg = load_config(path=p)
+        assert cfg["backend"] == {"default": "herdr"}
+
+    def test_parses_ui_section(self, tmp_path: Path) -> None:
+        """`[ui] setup = "lavish-axi"` lands in
+        `config["ui"]["setup"]` so the setup flow can read
+        the user's UI preference."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[ui]\n"
+            'setup = "lavish-axi"\n'
+        )
+        cfg = load_config(path=p)
+        assert cfg["ui"] == {"setup": "lavish-axi"}
+
+    def test_ollama_mode_field(self, tmp_path: Path) -> None:
+        """`[ollama] mode = "chat"` lands in
+        `config["ollama"]["mode"]` so the runtime layer can
+        switch between claude-via-ollama and plain ollama chat."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            "[ollama]\n"
+            'mode = "chat"\n'
+            'model = "minimax-m3:cloud"\n'
+        )
+        cfg = load_config(path=p)
+        assert cfg["ollama"]["mode"] == "chat"
+        assert cfg["ollama"]["model"] == "minimax-m3:cloud"
 
     def test_normalises_openai_compatible_section(self, tmp_path: Path) -> None:
         """`openai_compatible` in the file is normalised to
@@ -502,8 +637,22 @@ class TestBuildSpawnArgs:
         assert cmd == ["claude", "--model", "opus"]
         assert env == {}
 
-    def test_ollama_runtime(self) -> None:
+    def test_ollama_runtime_uses_claude_via_ollama(self) -> None:
+        """`--runtime ollama` reuses the `claude` CLI with the
+        ollama OpenAI-compatible endpoint. This gives a
+        Claude-Code-style coding agent backed by a local model.
+        Plain `ollama run` lives under `--runtime ollama-chat`."""
         runtime = Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        cmd, env = build_spawn_args(runtime)
+        assert cmd == ["claude", "--model", "minimax-m3:cloud"]
+        assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+
+    def test_ollama_chat_runtime_uses_ollama_run(self) -> None:
+        """`--runtime ollama-chat` is the opt-in path for the
+        plain ollama chat REPL. Same argv as before the
+        refinement round."""
+        runtime = Runtime(name="ollama-chat", model="minimax-m3:cloud", source="test")
         cmd, env = build_spawn_args(runtime)
         assert cmd == ["ollama", "run", "minimax-m3:cloud"]
         assert env == {}
@@ -593,18 +742,38 @@ class TestBuildSpawnArgs:
 
 
 class TestRuntimeSummaryLines:
-    """`runtime_summary_lines` produces the three-line "what is
+    """`runtime_summary_lines` produces the 7-line "what is
     going to be used" block. The format is the user's contract."""
 
     def test_claude_summary(self) -> None:
         runtime = Runtime(name="claude", model="opus", source="test")
         lines = runtime_summary_lines(runtime)
-        assert lines == ["runtime: claude", "model:   opus"]
+        assert lines == [
+            "runtime:      claude",
+            "runtime mode: claude",
+            "model:        opus",
+        ]
 
-    def test_ollama_summary(self) -> None:
+    def test_ollama_summary_includes_mode(self) -> None:
+        """The ollama runtime's summary must surface the
+        claude-via-ollama mode so the user can see that
+        `claude` (not `ollama`) is the actual command."""
         runtime = Runtime(name="ollama", model="minimax-m3:cloud", source="test")
         lines = runtime_summary_lines(runtime)
-        assert lines == ["runtime: ollama", "model:   minimax-m3:cloud"]
+        assert lines == [
+            "runtime:      ollama",
+            "runtime mode: claude-via-ollama",
+            "model:        minimax-m3:cloud",
+        ]
+
+    def test_ollama_chat_summary(self) -> None:
+        runtime = Runtime(name="ollama-chat", model="minimax-m3:cloud", source="test")
+        lines = runtime_summary_lines(runtime)
+        assert lines == [
+            "runtime:      ollama-chat",
+            "runtime mode: chat",
+            "model:        minimax-m3:cloud",
+        ]
 
     def test_openai_compatible_includes_base_url(self) -> None:
         runtime = Runtime(
@@ -615,9 +784,32 @@ class TestRuntimeSummaryLines:
         )
         lines = runtime_summary_lines(runtime)
         assert lines == [
-            "runtime: openai-compatible",
-            "model:   minimax-m3:cloud",
-            "base_url: http://localhost:1234/v1",
+            "runtime:      openai-compatible",
+            "runtime mode: openai-compatible",
+            "model:        minimax-m3:cloud",
+            "base_url:     http://localhost:1234/v1",
+        ]
+
+    def test_seven_line_block_when_command_agent_cwd_backend_given(self) -> None:
+        """The pre-launch output block: 7 lines with the
+        command / agent / cwd / backend filled in. The exact
+        format is the user's contract."""
+        runtime = Runtime(name="ollama", model="minimax-m3:cloud", source="test")
+        lines = runtime_summary_lines(
+            runtime,
+            command=["claude", "--model", "minimax-m3:cloud"],
+            agent="primary-2",
+            cwd="C:\\path\\to\\repo",
+            backend="herdr",
+        )
+        assert lines == [
+            "runtime:      ollama",
+            "runtime mode: claude-via-ollama",
+            "model:        minimax-m3:cloud",
+            "backend:      herdr",
+            "command:      claude --model minimax-m3:cloud",
+            "agent:        primary-2",
+            "cwd:          C:\\path\\to\\repo",
         ]
 
 
@@ -685,8 +877,9 @@ class TestAgentGoRuntimeFlag:
         assert rc == 0
         captured = capsys.readouterr()
         # The summary block: stderr, prefixed with `agent-workbench: `.
-        assert "agent-workbench: runtime: ollama" in captured.err
-        assert "agent-workbench: model:   minimax-m3:cloud" in captured.err
+        assert "agent-workbench: runtime:      ollama" in captured.err
+        assert "agent-workbench: runtime mode: claude-via-ollama" in captured.err
+        assert "agent-workbench: model:        minimax-m3:cloud" in captured.err
         # The prompt body is on stdout.
         assert "Global toolkit instructions" in captured.out
 
