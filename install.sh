@@ -14,7 +14,9 @@
 #          gnhf, ollama, wezterm via brew / apt / curl-piped installer
 #        - writes the agent-workbench-home marker file so the shims
 #          resolve back to the toolkit root from .local/bin
-#   3. Adds $HOME/.local/bin to PATH in $HOME/.bashrc and $HOME/.zshrc.
+#   3. Prints the export line the user should add to their shell rc;
+#      does NOT edit profile files. (Use `agent-init --print-path`
+#      to re-print it later.)
 #   4. Prints the next step: `cd <your repo>; agent-go`.
 set -euo pipefail
 
@@ -53,14 +55,30 @@ export AGENT_WORKBENCH_HOME="${INSTALL_ROOT}"
 export PYTHONPATH="${INSTALL_ROOT}/scripts/python:${PYTHONPATH:-}"
 "${PY}" "${INSTALL_ROOT}/scripts/python/dispatch.py" init --bootstrap=all
 
-# 3. Add ~/.local/bin to PATH in the user's shell rc.
-for rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
-    if [ -f "${rc}" ] && ! grep -q "${BIN_DIR}" "${rc}" 2>/dev/null; then
-        printf '\n# Added by agent-workbench installer\nexport PATH="%s:$PATH"\n' "${BIN_DIR}" >> "${rc}"
-        say "added ${BIN_DIR} to PATH in ${rc}"
-    fi
-done
+# 3. Print the export line the user should add to their shell rc.
+#    We do NOT edit ~/.bashrc, ~/.zshrc, or any other profile file.
+#    Session-only PATH is still set on the next line so the rest of
+#    the installer (and any tools the user runs in this session) can
+#    see the shims.
 export PATH="${BIN_DIR}:${PATH}"
+
+_rc_path() {
+  case "${SHELL:-}" in
+    */zsh)  printf '%s' "${HOME}/.zshrc" ;;
+    */bash) printf '%s' "${HOME}/.bashrc" ;;
+    */fish) printf '%s' "${HOME}/.config/fish/config.fish" ;;
+    *)      printf '%s' "${HOME}/.bashrc (or your shell's rc file)" ;;
+  esac
+}
+
+if ! printf '%s' "${PATH}" | tr ':' '\n' | grep -qx "${BIN_DIR}"; then
+  say ""
+  say "add ${BIN_DIR} to your PATH for future shells by adding this line"
+  say "to $(_rc_path):"
+  say ""
+  say "    export PATH=\"${BIN_DIR}:\$PATH\""
+  say ""
+fi
 
 # 4. Next step.
 say ""
