@@ -51,13 +51,20 @@ import bootstrap as _bootstrap
 
 # What `agent-go` ensures is installed by default. The user can scope
 # with `--bootstrap=claude,herdr` etc.
+#
+# What is NOT here on purpose:
+# - `treehouse` — opt-in via `--bootstrap=treehouse`. A single-agent
+#   `agent-go` flow does not need a worktree pool; `agent-fleet` is
+#   the path that wants it.
+# - `gnhf` — overnight runner, not used by interactive `agent-go`.
+#   gnhf ships no Windows release, so leaving it in the default would
+#   make every Windows `agent-go` hit the honest-but-noisy
+#   'no asset matching' error. Use `agent-overnight` to drive gnhf.
 DEFAULT_GO_BOOTSTRAP = (
     "claude",
     "herdr",
     "firstmate",
     "no-mistakes",
-    "treehouse",
-    "gnhf",
     "ollama",
 )
 
@@ -297,7 +304,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--print-prompt",
         action="store_true",
-        help="Print the assembled prompt to stdout and exit (skip the model launch).",
+        help="Print the assembled prompt to stdout and exit. Skips the install step, "
+             "the herdr server, and the model launch. Use this for a read-only view of "
+             "the prompt, or to capture the prompt to a file.",
     )
     parser.add_argument(
         "task_text",
@@ -313,7 +322,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     repo = (args.repo or find_repo_root()).resolve()
     info(f"repo: {repo}")
 
-    # Step 1: install missing tools (unless told to skip).
+    # Step 1: assemble the prompt. Done up-front so the read-only paths
+    # (`--print-prompt`) can return before the install step touches the
+    # network. The previous order (install, then assemble) made
+    # `agent-go --print-prompt` produce a noisy "no asset" error from
+    # the gnhf install on Windows even though the user never asked to
+    # launch anything.
+    body, loaded = assemble_prompt(repo, task=args.task)
+    if args.task_text:
+        body = body.rstrip() + "\n\n## Task\n\n" + args.task_text.strip() + "\n"
+    info(f"prompt: {len(body):,} bytes from {len(loaded)} file(s)")
+    if args.print_prompt:
+        # Pure read path. No install, no herdr, no model launch.
+        sys.stdout.write(body)
+        return 0
+
+    # Step 2: install missing tools (unless told to skip). Only reached
+    # on the actual run path; `--print-prompt` already returned above.
     if not args.no_bootstrap:
         targets = [t.strip() for t in args.bootstrap.split(",") if t.strip()]
         rc = _bootstrap_if_needed(targets, allow_curl=not args.no_curl, assume_yes=args.yes)
@@ -321,15 +346,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             info("some tools could not be installed; continuing with what we have")
     _ensure_path()
     _print_path_hint_if_needed()
-
-    # Step 2: assemble the prompt.
-    body, loaded = assemble_prompt(repo, task=args.task)
-    if args.task_text:
-        body = body.rstrip() + "\n\n## Task\n\n" + args.task_text.strip() + "\n"
-    info(f"prompt: {len(body):,} bytes from {len(loaded)} file(s)")
-    if args.print_prompt:
-        sys.stdout.write(body)
-        return 0
 
     # Step 3: write the prompt to .agent/SYSTEM_PROMPT.md so Claude Code
     # auto-loads it via its CLAUDE.md discovery.
