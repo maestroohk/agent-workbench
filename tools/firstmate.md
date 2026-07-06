@@ -116,3 +116,10 @@ description = "Verify formatting"
 - Readme: <https://github.com/kunchenguid/firstmate#readme>
 - Required harness: any of `claude`, `codex`, `opencode`, `pi`, `grok`
   (the first mate is launched by one of these)
+
+> **Note on `agent-check`.** As of 2026-07-06, `agent-check` does not
+> call `firstmate doctor` or `firstmate build` — those subcommands do
+> not exist upstream. Instead it reports the harness's install path,
+> the most recent commit, the shim resolution, and a count of
+> `bin/fm-*.sh` scripts. See `CHANGELOG.md` [Unreleased] for the
+> change history.

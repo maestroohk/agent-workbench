@@ -7,7 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`bootstrap` firstmate probe was wrong**: the `firstmate` entry in
+  `DEPENDENCIES` had `probe: "claude"`, so the installer reported
+  "firstmate: already present at ...npm/claude" on every machine
+  with the Claude CLI and never actually cloned the firstmate
+  harness. Now probes by `"firstmate"` (the shim name) and falls
+  back to the `${HOME}/firstmate/AGENTS.md` presence hint. A new
+  post-install hook system drops a `firstmate` shim in
+  `~/.local/bin/` that dispatches to the harness's `bin/fm-*.sh`
+  scripts, so callers get a stable command name.
+- **`agent-check` no longer pretends to call non-existent firstmate
+  subcommands**: dropped the `firstmate.toml` requirement from
+  `firstmate_present()` (the format doesn't exist upstream) and
+  replaced the fake "firstmate doctor passed" line with a real
+  preflight that reports the harness path, the most recent commit,
+  the shim resolution, and the count of `bin/fm-*.sh` scripts.
+  `firstmate build` is now a documented no-op ("no build subcommand
+  upstream (workbench skips)"). Verified on Windows: `agent-check`
+  on `~/code/lavish-demo` now reports firstmate truthfully.
+- **`gnhf` install no longer runs `npm install -g gnhf`**: gnhf is a
+  Go binary at `github.com/kunchenguid/gnhf`, not an npm package.
+  Now uses the same `_github_release` path as no-mistakes and
+  treehouse. As of 2026-07-06, `gnhf` ships no Windows release, so
+  the install on Windows surfaces an honest "no asset matching ...
+  (have: [])" error rather than a silent npm failure.
+- **`_install_from_github_release` is robust to tags that already
+  start with the binary name**: `gnhf`'s tags are `gnhf-v0.1.42`
+  etc., so the asset name pattern `<binary>-<tag>-<os>-<arch>` would
+  have produced `gnhf-gnhf-v0.1.42-...`. The tag is now stripped of
+  a single leading `<binary>-` if present. No effect on no-mistakes
+  or treehouse.
+- **`subprocess.run(['npm', ...])` and `subprocess.run(['npx', ...])`
+  on Windows**: `shutil.which('npm')` returns the bare `npm` shim
+  (a Node.js script, not a PE binary), which `CreateProcess` rejects
+  with `WinError 193`. The PowerShell-path resolution in
+  `_run_method` now also falls back to `name.cmd` for any command
+  whose resolved path is not a recognized Windows executable
+  extension. This unblocks the `claude` and `ollama` install paths
+  too (both had the same latent bug; masked because both were
+  pre-installed on the test machine).
+- **No-mojibake subprocess output**: `run_command` in `utils.py` was
+  decoding captured output with the default locale (cp1252 on
+  Windows), which crashed on `no-mistakes doctor`'s UTF-8 checkmarks
+  and rendered them as `âœ"` in the report. Now decodes as UTF-8
+  with `errors="replace"`. Visible improvement: the
+  `no-mistakes doctor` info lines now render `✓` and `–` correctly.
+- **Windows + Git Bash now resolves `agent-init`, `agent-go`, etc.**
+  The installer previously dropped only the PowerShell shims
+  (`agent-init.ps1`), which Git Bash cannot execute directly. Now
+  also drops a bash shim alongside, on every platform. On Windows
+  the bash shim delegates to the PowerShell shim so users get the
+  platform-native python resolution (the Microsoft Store App
+  Execution Alias can hijack a bare `python` call from non-MSYS
+  shells). On unix the bash shim is the same as before.
+
 ### Added
+- **`lavish-axi` is now in the dependency table** and installable via
+  `agent-init --bootstrap=lavish-axi` (or `--bootstrap=all`). The
+  README and `tools/lavish-axi.md` both claimed this command worked
+  pre-fix; it didn't. The entry uses `npm install -g lavish-axi`
+  and is kept out of `DEFAULT_BOOTSTRAP_SET` so the default install
+  stays focused on the runtime toolchain. Verified on Windows:
+  installs `kunchenguid/lavish-axi v0.1.36` and drops a working
+  `lavish-axi` binary at `%APPDATA%\npm\lavish-axi`.
+
+### Changed
+- **`tools/lavish-axi.md` integration section**: previously claimed
+  `agent-init --bootstrap=lavish-axi` runs the `npx skills add`
+  step. The workbench installs the npm binary, not the agent
+  skill. The new text matches the actual install command.
 - **Real install for no-mistakes and treehouse**: replaced the
   fictional `irm ... | iex` URLs in `bootstrap.py` with a
   `_install_from_github_release` helper that downloads the latest
