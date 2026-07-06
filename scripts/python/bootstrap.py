@@ -118,6 +118,18 @@ DEPENDENCIES: dict[str, dict] = {
             {"any": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
         ],
     },
+    "lavish-axi": {
+        # lavish-axi is an npm package AND an agent skill (kunchenguid/lavish-axi).
+        # The probe checks for the binary that `npm install -g lavish-axi` lands.
+        # We do NOT add this to DEFAULT_BOOTSTRAP_SET: the default install
+        # stays focused on the runtime toolchain; lavish-axi is an authoring
+        # tool and is opt-in via --bootstrap=lavish-axi or --all.
+        "probe": "lavish-axi",
+        "purpose": "Local-first HTML authoring tool for human + AI collaboration on HTML artifacts (kunchenguid/lavish-axi).",
+        "install": [
+            {"any": ["npm", "install", "-g", "lavish-axi"]},
+        ],
+    },
 }
 
 
@@ -264,9 +276,30 @@ def _run_method(method_args: list[str], *, timeout: int = _DEFAULT_INSTALL_TIMEO
             expanded[0] = full
         else:
             return False, "powershell/pwsh not on PATH; cannot run Windows installer"
+    # On Windows, `subprocess.run` cannot find a bare `npm` / `npx` /
+    # `node` because the real binaries are `npm.cmd` / `npx.cmd` /
+    # `node.exe` (or, for npm installed via npm itself, a wrapper shim
+    # without an extension that CreateProcess won't execute). Resolve
+    # the first arg to its real path so CreateProcess can find it. If
+    # the name already has an extension (.cmd / .exe / .ps1 / .bat) the
+    # shutil.which lookup will still find it.
+    if expanded and os.name == "nt" and not os.path.isabs(expanded[0]):
+        resolved = shutil.which(expanded[0])
+        if resolved:
+            # Python's shutil.which respects PATHEXT but returns the
+            # first match, which on a Node.js install is the bare
+            # `npm` (a shim script). CreateProcess on Windows rejects
+            # that with WinError 193. If the resolved path doesn't end
+            # in a recognized executable extension, prefer `name.cmd`.
+            _, ext = os.path.splitext(resolved)
+            if ext.lower() not in (".exe", ".cmd", ".bat", ".ps1", ".com"):
+                cmd_alt = shutil.which(expanded[0] + ".cmd")
+                if cmd_alt:
+                    resolved = cmd_alt
+            expanded[0] = resolved
     info(f"trying: {' '.join(expanded[:3])}…")
     try:
-        result = subprocess.run(expanded, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(expanded, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except FileNotFoundError as exc:
         return False, f"executable not found: {expanded[0]} ({exc})"
     except subprocess.TimeoutExpired as exc:
