@@ -169,10 +169,27 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(prompt_body, encoding="utf-8")
     info(f"prompt written: {out}")
-    worktree_args = [herdr, "worktree", "create", "--label", "agent-go", "--no-focus", "--json"]
+    worktree_args = [
+        herdr,
+        "worktree",
+        "create",
+        "--cwd",
+        str(repo),
+        "--label",
+        "agent-go",
+        "--no-focus",
+        "--json",
+    ]
     wt_result = subprocess.run(worktree_args, capture_output=True, text=True, cwd=str(repo), timeout=30)
     if wt_result.returncode != 0:
-        info(f"herdr worktree create failed: {wt_result.stderr.strip()[:200]}")
+        # herdr fails on fresh repos with no HEAD; on detached HEADs; or
+        # when its own server socket is wedged. None of these is fatal —
+        # we can still spawn the agent in the repo dir. Surface the
+        # reason so the user can see what happened, then continue.
+        info(
+            f"herdr worktree create failed ({wt_result.stderr.strip()[:120] or 'no stderr'}); "
+            f"running agent in repo root instead"
+        )
         worktree_path = str(repo)
     else:
         worktree_path = wt_result.stdout.strip() or str(repo)
@@ -190,8 +207,8 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
         "primary",
         "--cwd",
         worktree_path,
-        "--tab",
-        "new",
+        "--split",
+        "right",
         "--no-focus",
         "--",
         claude,
@@ -200,8 +217,15 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
         "--model",
         model,
     ]
-    info("starting herdr agent 'primary' running claude")
+    info(f"starting herdr agent 'primary' in {worktree_path} (use 'herdr agent attach primary' to follow)")
     result = subprocess.run(cmd, cwd=str(repo))
+    if result.returncode != 0:
+        info(
+            f"herdr agent start failed (exit {result.returncode}); "
+            f"falling back to direct claude"
+        )
+        return _spawn_claude(repo, model)
+    info("herdr agent 'primary' started")
     return result.returncode
 
 

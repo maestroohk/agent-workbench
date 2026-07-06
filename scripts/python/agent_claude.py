@@ -111,12 +111,26 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
     if not herdr:
         info("herdr executable not found; falling back")
         return _spawn_claude(repo, model)
-    worktree_args = ["herdr", "worktree", "create", "--label", f"agent-{agent_name}", "--no-focus", "--json"]
+    worktree_args = [
+        herdr,
+        "worktree",
+        "create",
+        "--cwd",
+        str(repo),
+        "--label",
+        f"agent-{agent_name}",
+        "--no-focus",
+        "--json",
+    ]
     wt_result = run_command(worktree_args, cwd=repo)
     if wt_result.returncode != 0:
-        info(f"herdr worktree create failed: {wt_result.stderr.strip()[:200]}")
-        return _spawn_claude(repo, model)
-    worktree_path = wt_result.stdout.strip() or str(repo)
+        info(
+            f"herdr worktree create failed ({wt_result.stderr.strip()[:120] or 'no stderr'}); "
+            f"running agent in repo root instead"
+        )
+        worktree_path = str(repo)
+    else:
+        worktree_path = wt_result.stdout.strip() or str(repo)
     info(f"worktree: {worktree_path}")
     # Resolve the inner `claude` to a real Windows executable (e.g.
     # `claude.cmd`) before handing it to herdr, so herdr's own
@@ -137,8 +151,8 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         agent_name,
         "--cwd",
         worktree_path,
-        "--tab",
-        "new",
+        "--split",
+        "right",
         "--no-focus",
         "--",
         claude,
@@ -149,6 +163,13 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
     ]
     info(f"running: herdr agent start {agent_name} -- {claude} --append-system-prompt <{prompt_path}> --model {model}")
     result = run_command(cmd, cwd=repo)
+    if result.returncode != 0:
+        info(
+            f"herdr agent start failed (exit {result.returncode}); "
+            f"falling back to direct claude"
+        )
+        return _spawn_claude(repo, model)
+    info(f"herdr agent '{agent_name}' started in {worktree_path}")
     return result.returncode
 
 
