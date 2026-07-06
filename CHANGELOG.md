@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`role` key on every `DEPENDENCIES` entry** in
+  `scripts/python/bootstrap.py`. Each tool is now classified by its
+  place in the workflow, not by its install method. The eight roles
+  are: `orchestrator` (firstmate), `visual-collaboration` (lavish-axi),
+  `isolation-manager` (treehouse), `validation-gate` (no-mistakes),
+  `overnight-runner` (gnhf), `agent-runtime` (herdr),
+  `model-runtime` (claude, ollama), `terminal-fallback` (wezterm).
+  See `tools/roles.md` for the full mapping. The `role` key is on
+  the internal `DEPENDENCIES` table only; `check_dependencies()` and
+  `DependencyStatus` keep their public signatures.
+
+### Changed
+- **`DEFAULT_BOOTSTRAP_SET` slimmed** from
+  `("herdr", "firstmate", "no-mistakes", "treehouse")` to
+  `("herdr", "firstmate", "no-mistakes")`. `treehouse` is opt-in via
+  `--bootstrap=treehouse` (or `--bootstrap=all`) because a
+  single-agent flow does not need a worktree pool. The
+  `agent-fleet --backend treehouse` path still works — the worktree
+  binary is just not pulled in by the default install.
+
 ### Fixed
 - **`bootstrap` firstmate probe was wrong**: the `firstmate` entry in
   `DEPENDENCIES` had `probe: "claude"`, so the installer reported

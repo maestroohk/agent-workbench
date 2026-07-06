@@ -1,8 +1,22 @@
 """Auto-install the external tools the workbench depends on.
 
 `agent-init` calls into here after symlinking the helper scripts, so a
-clean machine can end up with the full toolchain (herdr, firstmate,
-no-mistakes, treehouse, gnhf, ollama, wezterm) on PATH in one run.
+clean machine can end up with the full toolchain on PATH in one run.
+
+Each dependency has a `role` that names its place in the workflow:
+  - orchestrator         (firstmate)        top-level multi-agent coordinator
+  - visual-collaboration  (lavish-axi)       plans, mockups, summaries
+  - isolation-manager    (treehouse)        per-agent worktree pool
+  - validation-gate      (no-mistakes)      pre-push review/test/lint gate
+  - overnight-runner     (gnhf)             long-running autonomous loops
+  - agent-runtime        (herdr)            multiplexer for panes + worktrees
+  - model-runtime        (claude, ollama)   the model runner the agent uses
+  - terminal-fallback    (wezterm)          GPU terminal, optional alternative
+
+`DEFAULT_BOOTSTRAP_SET` is the slim runtime set: tools the typical
+single-agent flow needs. treehouse, lavish-axi, gnhf, and wezterm are
+opt-in via `--bootstrap=<name>` (or `--bootstrap=all`) because they are
+not on the hot path of a basic session.
 
 Design:
 - Each dependency is a small table entry describing how to probe for it
@@ -38,6 +52,7 @@ from utils import detect_platform, first_executable, info, run_command
 DEPENDENCIES: dict[str, dict] = {
     "wezterm": {
         "probe": "wezterm",
+        "role": "terminal-fallback",
         "purpose": "GPU-accelerated terminal (fallback when herdr's own mux is unwanted).",
         "install": [
             {"windows": ["winget", "install", "--id", "wez.wezterm", "-e", "--accept-source-agreements", "--accept-package-agreements"]},
@@ -48,6 +63,7 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "herdr": {
         "probe": "herdr",
+        "role": "agent-runtime",
         "purpose": "Agent multiplexer (default backend for agent-fleet).",
         "install": [
             {"windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://herdr.dev/install.ps1 | iex"]},
@@ -63,6 +79,7 @@ DEPENDENCIES: dict[str, dict] = {
         # missing but the harness is present, we still consider firstmate
         # installed.
         "probe": "firstmate",
+        "role": "orchestrator",
         "purpose": "Per-project command orchestrator harness (kunchenguid/firstmate). Clone github.com/kunchenguid/firstmate to ${HOME}/firstmate.",
         "install": [
             {"any": ["git", "clone", "https://github.com/kunchenguid/firstmate.git", "${HOME}/firstmate"]},
@@ -72,6 +89,7 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "no-mistakes": {
         "probe": "no-mistakes",
+        "role": "validation-gate",
         "purpose": "Git proxy that pre-validates with review/test/docs/lint before pushing.",
         "install": [
             # Real install: download the latest release asset from GitHub
@@ -81,6 +99,7 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "treehouse": {
         "probe": "treehouse",
+        "role": "isolation-manager",
         "purpose": "Git worktree pool — gives agent-fleet N isolated worktrees fast.",
         "install": [
             {"any": ["_github_release", "kunchenguid/treehouse", "treehouse"]},
@@ -88,6 +107,7 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "gnhf": {
         "probe": "gnhf",
+        "role": "overnight-runner",
         # gnhf is a Go binary published at github.com/kunchenguid/gnhf.
         # The previous install method (`npm install -g gnhf`) was wrong
         # — npm has no such package, and the silent failure mode
@@ -103,6 +123,7 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "ollama": {
         "probe": "ollama",
+        "role": "model-runtime",
         "purpose": "Local model runtime (fallback when the `claude` CLI is not available).",
         "install": [
             {"windows": ["winget", "install", "--id", "Ollama.Ollama", "-e", "--accept-source-agreements", "--accept-package-agreements"]},
@@ -113,6 +134,7 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "claude": {
         "probe": "claude",
+        "role": "model-runtime",
         "purpose": "Anthropic Claude Code CLI. The actual agent runtime for agent-claude and agent-fleet.",
         "install": [
             {"any": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
@@ -125,6 +147,7 @@ DEPENDENCIES: dict[str, dict] = {
         # stays focused on the runtime toolchain; lavish-axi is an authoring
         # tool and is opt-in via --bootstrap=lavish-axi or --all.
         "probe": "lavish-axi",
+        "role": "visual-collaboration",
         "purpose": "Local-first HTML authoring tool for human + AI collaboration on HTML artifacts (kunchenguid/lavish-axi).",
         "install": [
             {"any": ["npm", "install", "-g", "lavish-axi"]},
@@ -133,7 +156,7 @@ DEPENDENCIES: dict[str, dict] = {
 }
 
 
-DEFAULT_BOOTSTRAP_SET = ("herdr", "firstmate", "no-mistakes", "treehouse")
+DEFAULT_BOOTSTRAP_SET = ("herdr", "firstmate", "no-mistakes")
 
 
 # --- Public API -----------------------------------------------------------
