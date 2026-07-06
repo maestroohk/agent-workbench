@@ -41,6 +41,7 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    resolve_executable,
     run_command,
     workbench_root,
 )
@@ -105,7 +106,7 @@ def _bootstrap_if_needed(targets: list[str], *, allow_curl: bool, assume_yes: bo
 
 def _herdr_server_running() -> bool:
     """Return True if a herdr server is reachable (socket present and responsive)."""
-    herdr = first_executable(["herdr"])
+    herdr = resolve_executable("herdr")
     if not herdr:
         return False
     # `herdr status client` exits 0 when the socket answers.
@@ -120,7 +121,7 @@ def _herdr_server_running() -> bool:
 
 def _start_herdr_server() -> bool:
     """Start the herdr server in the background. Returns True if it came up."""
-    herdr = first_executable(["herdr"])
+    herdr = resolve_executable("herdr")
     if not herdr:
         return False
     if _herdr_server_running():
@@ -160,7 +161,7 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
     Returns the herdr invocation's returncode. The agent runs in its own
     pane; the user can attach with `herdr agent attach primary`.
     """
-    herdr = first_executable(["herdr"])
+    herdr = resolve_executable("herdr")
     if not herdr:
         return 1
     # First write the prompt to disk so we can pass --append-system-prompt-file.
@@ -175,6 +176,13 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
         worktree_path = str(repo)
     else:
         worktree_path = wt_result.stdout.strip() or str(repo)
+    # Resolve the inner `claude` to a real Windows executable (e.g.
+    # `claude.cmd`) before handing it to herdr, so herdr's own
+    # CreateProcessW call does not hit WinError 193 on the bare npm shim.
+    claude = resolve_executable("claude")
+    if not claude:
+        info("claude CLI not found; falling back to running claude directly")
+        return _spawn_claude(repo, model)
     cmd = [
         herdr,
         "agent",
@@ -186,7 +194,7 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
         "new",
         "--no-focus",
         "--",
-        "claude",
+        claude,
         "--append-system-prompt",
         prompt_body,
         "--model",
@@ -199,7 +207,7 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
 
 def _spawn_claude(repo: Path, model: str) -> int:
     """Launch the `claude` CLI in the current repo (no herdr isolation)."""
-    claude = first_executable(["claude"])
+    claude = resolve_executable("claude")
     if not claude:
         info("claude CLI not found; falling back to ollama run")
         return _spawn_ollama(repo, model)
@@ -210,7 +218,7 @@ def _spawn_claude(repo: Path, model: str) -> int:
 
 def _spawn_ollama(repo: Path, model: str) -> int:
     """Final fallback: `ollama run <model>`."""
-    ollama = first_executable(["ollama"])
+    ollama = resolve_executable("ollama")
     if not ollama:
         info("no model runner found (claude and ollama both missing)")
         info("install one with:  agent-go --bootstrap=claude    # or --bootstrap=ollama")
@@ -314,9 +322,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Step 5: launch the model.
     model = args.model or os.environ.get("AGENT_MODEL") or DEFAULT_MODEL
     info(f"model: {model}")
-    if herdr_up and first_executable(["claude"]):
+    if herdr_up and resolve_executable("claude"):
         return _spawn_via_herdr_agent(repo, body, model)
-    if first_executable(["claude"]):
+    if resolve_executable("claude"):
         return _spawn_claude(repo, model)
     return _spawn_ollama(repo, model)
 

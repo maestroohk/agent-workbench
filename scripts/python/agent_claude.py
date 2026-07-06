@@ -37,6 +37,7 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    resolve_executable,
     run_command,
     workbench_root,
 )
@@ -73,7 +74,7 @@ def write_prompt_to_repo(repo: Path, prompt: str) -> Path:
 
 
 def _herdr_available() -> bool:
-    return first_executable(["herdr"]) is not None
+    return resolve_executable("herdr") is not None
 
 
 def _ensure_herdr_claude_integration() -> bool:
@@ -106,6 +107,10 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         info("herdr unavailable or integration hook failed; falling back")
         return _spawn_claude(repo, model)
     info(f"spawning herdr agent: {agent_name}")
+    herdr = resolve_executable("herdr")
+    if not herdr:
+        info("herdr executable not found; falling back")
+        return _spawn_claude(repo, model)
     worktree_args = ["herdr", "worktree", "create", "--label", f"agent-{agent_name}", "--no-focus", "--json"]
     wt_result = run_command(worktree_args, cwd=repo)
     if wt_result.returncode != 0:
@@ -113,13 +118,20 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         return _spawn_claude(repo, model)
     worktree_path = wt_result.stdout.strip() or str(repo)
     info(f"worktree: {worktree_path}")
+    # Resolve the inner `claude` to a real Windows executable (e.g.
+    # `claude.cmd`) before handing it to herdr, so herdr's own
+    # CreateProcessW call does not hit WinError 193 on the bare npm shim.
+    claude = resolve_executable("claude")
+    if not claude:
+        info("claude CLI not found; falling back")
+        return _spawn_claude(repo, model)
     # Pass the prompt as `--append-system-prompt-file <path>` so we don't
     # have to shell out to `cat` (which is not on PATH inside the herdr
     # spawn on Windows) and we don't have to inline a multi-KB string into
     # a command line. Claude Code reads the file directly.
     prompt_body = prompt_path.read_text(encoding="utf-8")
     cmd = [
-        "herdr",
+        herdr,
         "agent",
         "start",
         agent_name,
@@ -129,20 +141,20 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         "new",
         "--no-focus",
         "--",
-        "claude",
+        claude,
         "--append-system-prompt",
         prompt_body,
         "--model",
         model,
     ]
-    info(f"running: herdr agent start {agent_name} -- claude --append-system-prompt <{prompt_path}> --model {model}")
+    info(f"running: herdr agent start {agent_name} -- {claude} --append-system-prompt <{prompt_path}> --model {model}")
     result = run_command(cmd, cwd=repo)
     return result.returncode
 
 
 def _spawn_claude(repo: Path, model: str) -> int:
     """Launch the `claude` CLI in the current repo (no herdr isolation)."""
-    claude = first_executable(["claude"])
+    claude = resolve_executable("claude")
     if not claude:
         info("claude CLI not found on PATH; falling back to ollama run")
         return _spawn_ollama(repo, model)
@@ -155,7 +167,7 @@ def _spawn_claude(repo: Path, model: str) -> int:
 
 def _spawn_ollama(repo: Path, model: str) -> int:
     """Fall back to ollama run <model> when no other runner is available."""
-    ollama = first_executable(["ollama"])
+    ollama = resolve_executable("ollama")
     if not ollama:
         print("no model runner found", file=sys.stderr)
         print("install the claude CLI (npm i -g @anthropic-ai/claude-code) or ollama (winget install Ollama.Ollama)", file=sys.stderr)
@@ -232,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
     backend = args.backend
     if backend == "auto":
-        backend = "herdr" if _herdr_available() and first_executable(["claude"]) else ("claude" if first_executable(["claude"]) else "ollama")
+        backend = "herdr" if _herdr_available() and resolve_executable("claude") else ("claude" if resolve_executable("claude") else "ollama")
         info(f"auto-selected backend: {backend}")
 
     if backend == "herdr":
