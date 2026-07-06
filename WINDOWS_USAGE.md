@@ -79,20 +79,49 @@ What happens, in order:
    auto-loads it).
 4. The herdr server is started in the background (if not already
    running).
-5. A herdr agent is spawned in a right-split pane running
-   `claude.cmd` with the system prompt appended.
-6. The shell prints one line telling you how to attach:
-   `agent started in herdr pane primary (terminal: <id>). Use
-   \`herdr agent attach primary\` to follow, or paste your task
-   prompt in the pane.`
+5. A herdr worktree is created (a fresh checkout of your repo).
+6. A herdr agent is spawned in a right-split pane running
+   `claude.cmd` with the system prompt appended, in the worktree
+   path. The agent's actual cwd is verified against the requested
+   worktree path; if they differ, you get a `[warn]` line.
+7. `agent-go` prints an instruction block:
 
-At this point you are back at the PowerShell prompt. Open the herdr
-pane (or `herdr agent attach primary`) and paste the task prompt
-that was printed by `agent-go`.
+   ```
+   agent-workbench: herdr agent 'primary' started
+   agent-workbench:   repo root   : C:\path\to\your\repo
+   agent-workbench:   worktree    : C:\Users\henry\.herdr\worktrees\TeamTasksBoard\worktree-brave-river-57c0
+   agent-workbench:   agent cwd   : C:\Users\henry\.herdr\worktrees\TeamTasksBoard\worktree-brave-river-57c0
+   agent-workbench:   agent name  : primary
+   agent-workbench:   attach with : herdr agent attach primary
+   agent-workbench: NEXT STEP: paste the task prompt in the herdr pane (or in the attach session).
+   ```
+8. **Auto-attach**: if you are in a TTY (a normal PowerShell window
+   is one) and you have not set `AGENT_GO_NO_AUTO_ATTACH=1`, `agent-go`
+   blocks on `herdr agent attach primary` so you land directly in the
+   agent's pane. Detach with `Ctrl-b d`. The agent keeps running in
+   the background.
+9. If auto-attach is skipped (CI, non-TTY, `AGENT_GO_NO_AUTO_ATTACH=1`,
+   or `--no-attach`), `agent-go` exits 0 and the instruction block
+   tells you exactly what to do next.
+
+### Opting out of auto-attach
+
+```powershell
+# Skip auto-attach for a single run
+agent-go --task code --no-attach
+
+# Skip auto-attach globally (e.g. in a script)
+$env:AGENT_GO_NO_AUTO_ATTACH = "1"
+agent-go --task code
+```
+
+`AGENT_GO_NO_AUTO_ATTACH=1` works in any shell. `--no-attach` is a
+flag for one-off use. In both cases, the instruction block is the
+last thing printed before `agent-go` exits 0.
 
 ### What if the herdr pane does not open?
 
-The flow above is the happy path. Two of the things that can go
+The flow above is the happy path. Three of the things that can go
 wrong and how to recover:
 
 **A. `herdr worktree create` failed on a fresh repo (no commits).**
@@ -102,15 +131,36 @@ You will see:
 agent-workbench: herdr worktree create failed (fatal: invalid
 reference: HEAD); running agent in repo root instead
 agent-workbench: starting herdr agent 'primary' in <repo>
-(use 'herdr agent attach primary' to follow)
+agent-workbench: herdr agent 'primary' started
+agent-workbench:   repo root   : <repo>
+agent-workbench:   worktree    : <repo>
+agent-workbench:   agent cwd   : <repo>
+agent-workbench:   agent name  : primary
+agent-workbench:   attach with : herdr agent attach primary
 ```
 
-This is the new fallback: the agent is spawned in the repo root
-instead of a fresh worktree, and you still get the herdr pane. If
-you want a clean worktree, commit your changes first
+The agent is spawned in the repo root instead of a fresh worktree.
+If you want a clean worktree, commit your changes first
 (`git add -A && git commit -m "wip"`) and re-run.
 
-**B. `herdr agent start` failed for some other reason (server
+**B. `herdr agent start` returned an `agent_started.cwd` that does
+not match the requested worktree path.** You will see:
+
+```
+agent-workbench: herdr agent started in C:\Users\henry, expected
+C:\Users\henry\.herdr\worktrees\TeamTasksBoard\worktree-x; the
+agent may be in the wrong directory
+```
+
+This is a hard inconsistency. herdr accepted the spawn but landed
+the agent somewhere other than the worktree. The most common cause
+on a fresh Windows repo is that the worktree-create JSON envelope
+was not parseable (older herdr versions may emit a different shape).
+File a bug at `github.com/maestroohk/agent-workbench` with the
+output. As an immediate workaround, `agent-go --no-herdr` runs
+`claude.cmd` directly in the repo root.
+
+**C. `herdr agent start` failed for some other reason (server
 wedged, agent name taken, etc.).** You will see:
 
 ```

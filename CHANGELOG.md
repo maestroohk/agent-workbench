@@ -8,6 +8,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`agent-go --task code` now lands the agent in the worktree path,
+  not the user's home directory.** A previous version of the shim
+  passed `wt_result.stdout.strip()` as `--cwd` to `herdr agent
+  start`, but `wt_result.stdout` is the entire
+  `worktree_created` JSON envelope (e.g.
+  `{"worktree_created":{"worktree":{"path":"C:\\..."}}}`),
+  which herdr rejected by silently falling back to `$HOME`.
+  The shim now parses the envelope with a new
+  `utils.parse_json_loose()` helper (tolerant of leading
+  non-JSON noise and trailing garbage) and passes the actual
+  `worktree.path` string. The same fix applies to
+  `agent-claude --backend=herdr` and `agent-fleet --backend=herdr`,
+  which had the same bug. A Windows path with backslashes and
+  spaces (`C:\Users\Test User\repos\My App\worktree-x`)
+  round-trips intact.
+- **`agent-go` now verifies the agent's actual cwd.** After
+  `herdr agent start` returns, the shim parses the
+  `agent_started` JSON envelope (`{"agent_started":{"agent":"...","cwd":"...","argv":[...]}}`)
+  and compares `agent_started.cwd` to the requested worktree
+  path. If herdr landed the agent somewhere else, a `[warn]`
+  line is printed instead of silently claiming success. Path
+  comparison is normalized (`os.path.normcase` /
+  `os.path.normpath`) so backslash/forward-slash and
+  case differences don't trigger spurious warnings.
+- **`agent-go` now prints a clear instruction block after
+  spawning the agent.** The block contains the repo root, the
+  worktree path, the agent's actual cwd, the agent name, and
+  the `herdr agent attach <name>` command. This is what was
+  missing in the previous version — the user was returned to
+  the PowerShell prompt with no obvious next step.
+- **`agent-go` now attempts to auto-attach the user's terminal
+  to the running herdr agent.** Once the agent is up, the shim
+  calls `herdr agent attach <name>` as a foreground blocking
+  TTY call so the user lands directly in the agent's pane.
+  Auto-attach is enabled when stdout is a TTY and the env var
+  `AGENT_GO_NO_AUTO_ATTACH` is not set to a truthy value
+  (`1` / `true` / `yes` / `on`). If `herdr agent attach`
+  returns non-zero, the agent is still running and the
+  instruction block tells the user how to attach manually.
+- **New `--no-attach` flag for `agent-go`**. Suppresses the
+  auto-attach attempt; the instruction block is the last
+  thing printed before exit 0. Useful for CI / scripted use
+  where attaching the agent pane is not desired.
+- **`agent-fleet` does not auto-attach.** With N agents,
+  auto-attach would only work for one of them, so the shim
+  prints the `herdr agent attach <name>` command for every
+  agent and exits. The user attaches to any agent by name.
+- **New `utils.parse_json_loose(text)` helper.** Tries
+  `json.loads(text)` first; on `JSONDecodeError`, scans for
+  the first balanced `{...}` substring and returns the first
+  parseable dict. Returns `None` on empty / non-JSON input.
+  Used by every herdr shim to extract fields from herdr's
+  JSON envelopes, which sometimes have leading status lines
+  (e.g. `herdr: creating worktree...`).
+
+### Added
+- **`tests/test_herdr_json_parsing.py`** — 37 regression tests
+  covering the new `parse_json_loose` helper (clean object,
+  leading non-JSON noise, multiline pretty-printed, empty
+  string, whitespace, plain text, non-dict JSON, trailing
+  garbage, Windows path with spaces); the worktree-path
+  extraction (envelope shape `{"worktree_created":...}`,
+  top-level `{"path":"..."}`, `None` / empty input, wrong
+  inner types); the agent-info extraction (envelope shape,
+  top-level shape, `None` input, missing cwd, missing name,
+  `name` alias for `agent`); path normalization
+  (`os.path.normcase` / `os.path.normpath`, with Windows
+  backslash/forward-slash and case-insensitivity tests gated
+  on `sys.platform`); end-to-end `subprocess.run`
+  monkeypatching that verifies `--cwd` in the
+  `herdr agent start` call is the extracted worktree path
+  (not the raw JSON); cwd-mismatch warning; instruction
+  block content; and auto-attach opt-out (`AGENT_GO_NO_AUTO_ATTACH`
+  env var, `--no-attach` flag, non-TTY stdout). All
+  37 tests pass alongside the prior 55.
+
+### Fixed
 - **`agent-go` no longer fails silently when herdr cannot place an
   agent on Windows (or anywhere else).** The shim now passes
   `--cwd <repo>` to `herdr worktree create` (mandatory when no
