@@ -14,8 +14,10 @@
 #          gnhf, ollama, wezterm via winget / choco / curl-piped installer
 #        - writes the agent-workbench-home marker file so the shims
 #          resolve back to the toolkit root from .local\bin
-#   3. Adds $env:USERPROFILE\.local\bin to PATH for the current and
-#      future sessions (HKCU registry; no admin required).
+#   3. Asks before persisting $BinDir to the user PATH (HKCU); applies
+#      a session-only PATH change regardless so the rest of the
+#      installer and any tools run in the same session can resolve
+#      the shims.
 #   4. Prints the next step: `cd <your repo>; agent-go`
 #
 $ErrorActionPreference = 'Stop'
@@ -58,11 +60,26 @@ $env:AGENT_WORKBENCH_HOME = $InstallRoot
 $env:PYTHONPATH = (Join-Path $InstallRoot 'scripts\python')
 & $python (Join-Path $InstallRoot 'scripts\python\dispatch.py') init --bootstrap=all
 
-# 3. Add ~/.local/bin to PATH for the current session and future sessions.
+# 3. Add ~/.local/bin to PATH for the current session and (with the
+#    user's explicit consent) future sessions. The HKCU user-scope
+#    registry write is gated by a y/N prompt; the session-only change
+#    below is applied regardless.
 $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($currentPath -notlike "*${BinDir}*") {
-    [Environment]::SetEnvironmentVariable('Path', "${BinDir};${currentPath}", 'User')
-    Say "added $BinDir to your user PATH (restart shells to pick up)"
+    $proposed = "${BinDir};${currentPath}"
+    Say ""
+    Say "to make the shims available in future PowerShell sessions, persist this"
+    Say "to your user PATH (HKCU; no admin required):"
+    Say ""
+    Say "    $proposed"
+    Say ""
+    $answer = Read-Host -Prompt "Apply this change? [y/N]"
+    if ($answer -match '^[Yy]') {
+        [Environment]::SetEnvironmentVariable('Path', $proposed, 'User')
+        Say "added $BinDir to your user PATH (restart shells to pick up)"
+    } else {
+        Say "skipped: add $BinDir to your user PATH manually if you want it persistent"
+    }
 }
 $env:Path = "${BinDir};$env:Path"
 
