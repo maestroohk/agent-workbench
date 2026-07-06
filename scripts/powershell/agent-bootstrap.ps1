@@ -1,11 +1,11 @@
 # agent-workbench: install or update external tool dependencies (herdr, firstmate, no-mistakes, treehouse, gnhf, ollama, wezterm, claude).
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py bootstrap`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Only,
-    [switch]$All,
-    [switch]$Check,
-    [switch]$NoCurl,
-    [switch]$Json,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -54,13 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('bootstrap')
-if ($Only) { $forward += @('--only', $Only) }
-if ($All) { $forward += '--all' }
-if ($Check) { $forward += '--check' }
-if ($NoCurl) { $forward += '--no-curl' }
-if ($Json) { $forward += '--json' }
-if ($Rest) { $forward += $Rest }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'bootstrap' @Rest
 exit $LASTEXITCODE

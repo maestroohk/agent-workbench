@@ -1,23 +1,24 @@
-# agent-workbench: agent-overnight — gnhf wrapper with safe defaults.
+# agent-workbench: gnhf wrapper with safe defaults.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py overnight`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Repo,
-    [string]$TaskFile,
-    [string]$Agent = "claude",
-    [int]$MaxIterations = 50,
-    [int]$MaxTokens = 100000,
-    [string]$StopWhen,
-    [switch]$NoWorktree,
-    [switch]$CurrentBranch,
-    [switch]$Push,
-    [switch]$AllowDirty,
-    [switch]$DryRun,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Resolve the toolkit root. Order:
+#  1. AGENT_WORKBENCH_HOME env var (set by `agent-init` and by the bash dispatcher).
+#  2. The marker file `agent-workbench-home` written by `agent-init` next to the
+#     installed shims (so PowerShell wrappers can find the toolkit from
+#     ~/.local/bin/ without walking the wrong tree).
+#  3. Walk up from $ScriptDir looking for `scripts\python\dispatch.py`.
+#  4. Fall back to $ScriptDir\..\.. for the in-tree case.
 $ToolkitRoot = $env:AGENT_WORKBENCH_HOME
 if (-not $ToolkitRoot -or -not (Test-Path (Join-Path $ToolkitRoot 'scripts\python\dispatch.py'))) {
     $marker = Join-Path $ScriptDir 'agent-workbench-home'
@@ -45,26 +46,13 @@ $PythonDir = Join-Path $ToolkitRoot 'scripts\python'
 $env:AGENT_WORKBENCH_HOME = $ToolkitRoot
 $env:PYTHONPATH = "$PythonDir;$env:PYTHONPATH"
 
-$python = $null
-foreach ($candidate in @('python', 'python3', 'py')) {
-    $found = Get-Command $candidate -ErrorAction SilentlyContinue
-    if ($found) { $python = $found.Source; break }
+$python = (Get-Command python -ErrorAction SilentlyContinue).Source
+if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
+if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
+if (-not $python) {
+    Write-Error "python is required to run agent-workbench"
+    exit 127
 }
-if (-not $python) { Write-Error "python is required"; exit 127 }
 
-$forward = @('overnight')
-if ($Repo)            { $forward += @('--repo', $Repo) }
-if ($TaskFile)        { $forward += @('--task-file', $TaskFile) }
-if ($Agent)           { $forward += @('--agent', $Agent) }
-if ($MaxIterations)   { $forward += @('--max-iterations', $MaxIterations) }
-if ($MaxTokens)       { $forward += @('--max-tokens', $MaxTokens) }
-if ($StopWhen)        { $forward += @('--stop-when', $StopWhen) }
-if ($NoWorktree)      { $forward += '--no-worktree' }
-if ($CurrentBranch)   { $forward += '--current-branch' }
-if ($Push)            { $forward += '--push' }
-if ($AllowDirty)      { $forward += '--allow-dirty' }
-if ($DryRun)          { $forward += '--dry-run' }
-if ($Rest)            { $forward += $Rest }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'overnight' @Rest
 exit $LASTEXITCODE

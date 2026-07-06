@@ -1,10 +1,13 @@
 # agent-workbench: print a review-ready system prompt for the current repo.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py review`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Repo,
-    [ValidateSet('code', 'review', 'architecture', 'documentation', 'general')]
-    [string]$Task = 'review',
-    [string]$Output
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,9 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('review', '--task', $Task, '--show-files')
-if ($Repo) { $forward += @('--repo', $Repo) }
-if ($Output) { $forward += @('--output', $Output) }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'review' @Rest
 exit $LASTEXITCODE

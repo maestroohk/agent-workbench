@@ -1,19 +1,11 @@
 # agent-workbench: spawn N Claude agents in parallel, each in an isolated context.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py fleet`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [int]$Count,
-    [string]$Repo,
-    [ValidateSet('code', 'review', 'architecture', 'documentation', 'general')]
-    [string]$Task = 'general',
-    [string]$Model,
-    [ValidateSet('auto', 'herdr', 'treehouse', 'none')]
-    [string]$Backend = 'auto',
-    [ValidateSet('auto', 'yes', 'no')]
-    [string]$Worktree = 'auto',
-    [switch]$Wait,
-    [int]$Timeout = 600000,
-    [switch]$Json,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -62,16 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('fleet', $Count)
-if ($Repo) { $forward += @('--repo', $Repo) }
-$forward += @('--task', $Task)
-if ($Model) { $forward += @('--model', $Model) }
-$forward += @('--backend', $Backend)
-$forward += @('--worktree', $Worktree)
-if ($Wait) { $forward += '--wait' }
-$forward += @('--timeout', $Timeout)
-if ($Json) { $forward += '--json' }
-if ($Rest) { $forward += $Rest }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'fleet' @Rest
 exit $LASTEXITCODE

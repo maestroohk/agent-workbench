@@ -1,11 +1,13 @@
 # agent-workbench: install or update the toolkit.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py init`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [switch]$Force,
-    [switch]$PrintPlatform,
-    [string]$Bootstrap,
-    [switch]$NoBootstrap,
-    [switch]$NoCurl
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,12 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('init')
-if ($Force) { $forward += '--force' }
-if ($PrintPlatform) { $forward += '--print-platform' }
-if ($Bootstrap) { $forward += @('--bootstrap', $Bootstrap) }
-if ($NoBootstrap) { $forward += '--no-bootstrap' }
-if ($NoCurl) { $forward += '--no-curl' }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'init' @Rest
 exit $LASTEXITCODE

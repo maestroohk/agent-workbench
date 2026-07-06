@@ -1,17 +1,11 @@
 # agent-workbench: launch the model with the assembled system prompt.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py claude`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Repo,
-    [ValidateSet('code', 'review', 'architecture', 'documentation', 'general')]
-    [string]$Task = 'general',
-    [string]$Model,
-    [switch]$ShowPrompt,
-    [switch]$PrintLoaded,
-    [switch]$WriteOnly,
-    [ValidateSet('auto', 'herdr', 'claude', 'ollama', 'none')]
-    [string]$Backend = 'auto',
-    [ValidateSet('auto', 'yes', 'no')]
-    [string]$Worktree = 'auto',
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -60,15 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('claude', '--task', $Task)
-if ($Repo) { $forward += @('--repo', $Repo) }
-if ($Model) { $forward += @('--model', $Model) }
-if ($ShowPrompt) { $forward += '--show-prompt' }
-if ($PrintLoaded) { $forward += '--print-loaded' }
-if ($WriteOnly) { $forward += '--write-only' }
-$forward += @('--backend', $Backend)
-$forward += @('--worktree', $Worktree)
-if ($Rest) { $forward += $Rest }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'claude' @Rest
 exit $LASTEXITCODE

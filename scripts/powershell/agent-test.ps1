@@ -1,10 +1,13 @@
 # agent-workbench: run the project's test suite if one is detected.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py test`.
+# The inner module's main() is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Repo,
-    [switch]$DryRun,
-    [switch]$Firstmate,
-    [switch]$NoFirstmate
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,11 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('test')
-if ($Repo) { $forward += @('--repo', $Repo) }
-if ($DryRun) { $forward += '--dry-run' }
-if ($Firstmate) { $forward += '--firstmate' }
-if ($NoFirstmate) { $forward += '--no-firstmate' }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'test' @Rest
 exit $LASTEXITCODE

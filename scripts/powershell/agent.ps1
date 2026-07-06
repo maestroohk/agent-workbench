@@ -1,11 +1,13 @@
-# agent-workbench dispatcher (PowerShell).
-# All business logic lives in scripts/python/. This wrapper only sets up the
-# environment and invokes Python.
-
+# agent-workbench: agent — unified dispatcher (verb as the first arg).
+#
+# Thin pass-through — all user args land in $Rest and are forwarded
+# verbatim to `dispatch.py $Verb @Rest`. The inner module's main() is
+# the single source of truth for argument parsing. This shim exists so
+# callers can write `agent <verb> ...` instead of `agent-<verb> ...`.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('init', 'scan', 'check', 'review', 'test', 'claude')]
+    [ValidateSet('init', 'scan', 'check', 'review', 'test', 'claude', 'bootstrap', 'fleet', 'go', 'overnight')]
     [string]$Verb,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -34,6 +36,5 @@ if (-not $python) {
     exit 127
 }
 
-$argsList = @($Verb) + $Rest
-& $python (Join-Path $PythonDir 'dispatch.py') @argsList
+& $python (Join-Path $PythonDir 'dispatch.py') $Verb @Rest
 exit $LASTEXITCODE

@@ -152,13 +152,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--task",
         choices=sorted(TASK_AGENT_PROMPTS),
-        default="general",
-        help="Which task-specific agent prompt to layer in.",
+        default="review",
+        help="Which task-specific agent prompt to layer in. Default: review "
+             "(matches the legacy `agent-review` shim; pass --task general to "
+             "get the un-layered prompt).",
     )
     parser.add_argument(
         "--show-files",
         action="store_true",
-        help="Print the list of files that were loaded to stderr.",
+        default=True,
+        help="Print the list of files that were loaded to stderr. Default: on. "
+             "Pass --no-show-files to suppress.",
+    )
+    parser.add_argument(
+        "--no-show-files",
+        dest="show_files",
+        action="store_false",
+        help="Suppress the loaded-files report that --show-files enables by default.",
     )
     parser.add_argument(
         "--output",
