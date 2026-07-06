@@ -37,6 +37,7 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    parse_json_loose,
     resolve_executable,
     run_command,
     workbench_root,
@@ -130,7 +131,22 @@ def _spawn_herdr_agent(repo: Path, prompt_path: Path, model: str, agent_name: st
         )
         worktree_path = str(repo)
     else:
-        worktree_path = wt_result.stdout.strip() or str(repo)
+        # Parse herdr's JSON envelope to extract the actual worktree path.
+        # The previous code took stdout.strip() as the path, which sent
+        # the whole JSON blob as `--cwd` and made the agent land in $HOME.
+        payload = parse_json_loose(wt_result.stdout)
+        inner = payload.get("worktree_created") if isinstance(payload, dict) and isinstance(payload.get("worktree_created"), dict) else (payload or {})
+        wt_obj = inner.get("worktree") if isinstance(inner, dict) else None
+        if isinstance(wt_obj, dict) and wt_obj.get("path"):
+            worktree_path = str(wt_obj["path"])
+        elif isinstance(inner, dict) and inner.get("path"):
+            worktree_path = str(inner["path"])
+        else:
+            worktree_path = str(repo)
+            info(
+                f"herdr worktree create did not return a path; "
+                f"running agent in repo root instead"
+            )
     info(f"worktree: {worktree_path}")
     # Resolve the inner `claude` to a real Windows executable (e.g.
     # `claude.cmd`) before handing it to herdr, so herdr's own

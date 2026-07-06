@@ -41,12 +41,130 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    parse_json_loose,
     resolve_executable,
     run_command,
     workbench_root,
 )
 
 import bootstrap as _bootstrap
+
+
+# --- herdr JSON helpers --------------------------------------------------
+# herdr emits JSON envelopes like:
+#   {"worktree_created":{"worktree":{"path":"C:\\...\\worktree-x",...},...}}
+#   {"agent_started":{"agent":"primary","cwd":"C:\\...","argv":[...]}}
+# The previous code passed the raw stdout as `--cwd`, which sent the
+# whole JSON blob to herdr and made the agent land in $HOME. These
+# helpers extract the fields the workbench actually needs.
+
+def _extract_worktree_path(payload: Optional[dict]) -> Optional[str]:
+    """Return the worktree path from a `worktree_created` envelope, or None.
+
+    Tolerant of two shapes:
+      1. {"worktree_created":{"worktree":{"path":"..."}}}  -- current herdr
+      2. {"path":"..."}                                     -- future-proof
+    """
+    if not payload:
+        return None
+    inner = payload.get("worktree_created") if isinstance(payload.get("worktree_created"), dict) else payload
+    wt = inner.get("worktree") if isinstance(inner, dict) else None
+    if isinstance(wt, dict):
+        path = wt.get("path")
+        if path:
+            return str(path)
+    if isinstance(inner, dict):
+        path = inner.get("path")
+        if path:
+            return str(path)
+    return None
+
+
+def _extract_agent_info(payload: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
+    """Return (cwd, agent_name) from an `agent_started` envelope, or (None, None).
+
+    Tolerant of:
+      1. {"agent_started":{"agent":"primary","cwd":"...","argv":[...]}}
+      2. {"agent":"primary","cwd":"...","argv":[...]}            -- top-level
+    """
+    if not payload:
+        return None, None
+    inner = payload.get("agent_started") if isinstance(payload.get("agent_started"), dict) else payload
+    if not isinstance(inner, dict):
+        return None, None
+    cwd = inner.get("cwd")
+    name = inner.get("agent") or inner.get("name")
+    return (str(cwd) if cwd else None), (str(name) if name else None)
+
+
+def _paths_differ(a: str, b: str) -> bool:
+    """True if two filesystem paths are not the same after normalisation.
+
+    `os.path.normcase` makes the comparison case-insensitive on Windows
+    and applies the platform path-separator normalisation, so a Windows
+    path with backslashes matches the same path with forward slashes.
+    """
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.normpath(a)) != os.path.normcase(os.path.normpath(b))
+
+
+def _print_attach_instructions(*, repo: Path, worktree: str, actual_cwd: str, agent_name: str) -> None:
+    """Print the next-step block to stderr after a successful `herdr agent start`.
+
+    The block tells the user where the agent is, what to attach with,
+    and where to paste the task prompt. Without this block, the user is
+    dropped at the PowerShell prompt with no clear next action.
+    """
+    info(f"herdr agent '{agent_name}' started")
+    info(f"  repo root   : {repo}")
+    info(f"  worktree    : {worktree}")
+    info(f"  agent cwd   : {actual_cwd}")
+    info(f"  agent name  : {agent_name}")
+    info(f"  attach with : herdr agent attach {agent_name}")
+    info("NEXT STEP: paste the task prompt in the herdr pane (or in the attach session).")
+
+
+def _should_auto_attach() -> bool:
+    """Return True if `agent-go` should auto-attach the user's terminal.
+
+    Auto-attach is skipped when:
+    - the env var `AGENT_GO_NO_AUTO_ATTACH` is set to a truthy value.
+    - stdout is not a TTY (CI, redirected, captured by a parent process).
+    """
+    if os.environ.get("AGENT_GO_NO_AUTO_ATTACH", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _auto_attach(herdr: str, agent_name: str) -> int:
+    """Run `herdr agent attach <name>` as a blocking foreground call.
+
+    `herdr agent attach` takes over the user's terminal and drops them
+    into the agent's pane. We do this as a blocking call (no
+    `capture_output`) so the attach session uses the user's real TTY.
+    If the attach fails for any reason, the agent is still running; the
+    instruction block was already printed, so the user has a manual
+    fallback.
+    """
+    info(f"auto-attaching to agent '{agent_name}' (Ctrl-b d to detach, AGENT_GO_NO_AUTO_ATTACH=1 to disable)")
+    try:
+        result = subprocess.run([herdr, "agent", "attach", agent_name])
+    except OSError as exc:
+        info(f"herdr agent attach failed to start: {exc}")
+        info("the agent is still running; attach manually with: herdr agent attach " + agent_name)
+        return 0
+    if result.returncode != 0:
+        info(
+            f"herdr agent attach exited with code {result.returncode}; "
+            f"the agent is still running. Attach manually with: "
+            f"herdr agent attach {agent_name}"
+        )
+        return 0
+    return result.returncode
 
 
 # What `agent-go` ensures is installed by default. The user can scope
@@ -162,11 +280,16 @@ def _start_herdr_server() -> bool:
     return False
 
 
-def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
+def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str, *, auto_attach: bool = True) -> int:
     """Start a herdr agent that runs `claude --append-system-prompt <body>`.
 
     Returns the herdr invocation's returncode. The agent runs in its own
-    pane; the user can attach with `herdr agent attach primary`.
+    pane; the user can attach with `herdr agent attach primary`. If
+    `auto_attach` is True and stdout is a TTY, the function attempts to
+    run `herdr agent attach primary` as a blocking call so the user lands
+    directly in the agent's pane. Set `auto_attach=False` (or pass
+    `--no-attach` / `AGENT_GO_NO_AUTO_ATTACH=1`) to skip the attach and
+    just print the manual instruction block.
     """
     herdr = resolve_executable("herdr")
     if not herdr:
@@ -199,7 +322,20 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
         )
         worktree_path = str(repo)
     else:
-        worktree_path = wt_result.stdout.strip() or str(repo)
+        # herdr emits a JSON envelope like:
+        #   {"worktree_created":{"worktree":{"path":"C:\\...\\worktree-x",...},...}}
+        # The previous code took stdout.strip() as the path, which meant
+        # the entire JSON blob was passed as `--cwd` to `herdr agent
+        # start`. herdr silently fell back to the user's home directory
+        # on an invalid cwd, and the agent ended up in the wrong place.
+        # Parse the JSON and pull the path out.
+        payload = parse_json_loose(wt_result.stdout)
+        worktree_path = _extract_worktree_path(payload) or str(repo)
+        if payload and worktree_path == str(repo):
+            info(
+                f"herdr worktree create did not return a path; "
+                f"running agent in repo root instead"
+            )
     # Resolve the inner `claude` to a real Windows executable (e.g.
     # `claude.cmd`) before handing it to herdr, so herdr's own
     # CreateProcessW call does not hit WinError 193 on the bare npm shim.
@@ -224,16 +360,35 @@ def _spawn_via_herdr_agent(repo: Path, prompt_body: str, model: str) -> int:
         "--model",
         model,
     ]
-    info(f"starting herdr agent 'primary' in {worktree_path} (use 'herdr agent attach primary' to follow)")
-    result = subprocess.run(cmd, cwd=str(repo))
+    info(f"starting herdr agent 'primary' in {worktree_path}")
+    # Capture stdout so we can read herdr's `agent_started` JSON envelope
+    # and verify the agent actually started in the cwd we asked for.
+    # The previous code discarded stdout and only printed a single line,
+    # which masked the "agent started in $HOME" bug.
+    result = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True)
     if result.returncode != 0:
         info(
             f"herdr agent start failed (exit {result.returncode}); "
+            f"stderr: {result.stderr.strip()[:200] or '(empty)'}; "
             f"falling back to direct claude"
         )
         return _spawn_claude(repo, model)
-    info("herdr agent 'primary' started")
-    return result.returncode
+    # Pull the actual cwd herdr used from the `agent_started` envelope.
+    started_payload = parse_json_loose(result.stdout)
+    actual_cwd, agent_name = _extract_agent_info(started_payload)
+    actual_cwd = actual_cwd or worktree_path
+    if not agent_name:
+        agent_name = "primary"
+    # Warn if herdr's reported cwd does not match what we asked for.
+    if actual_cwd and worktree_path and _paths_differ(actual_cwd, worktree_path):
+        info(
+            f"herdr agent started in {actual_cwd}, expected {worktree_path}; "
+            f"the agent may be in the wrong directory"
+        )
+    _print_attach_instructions(repo=repo, worktree=worktree_path, actual_cwd=actual_cwd, agent_name=agent_name)
+    if auto_attach and _should_auto_attach():
+        return _auto_attach(herdr, agent_name)
+    return 0
 
 
 def _spawn_claude(repo: Path, model: str) -> int:
@@ -295,6 +450,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--no-bootstrap", action="store_true", help="Skip the install step; assume everything is present.")
     parser.add_argument("--no-curl", action="store_true", help="Skip install methods that pipe a remote shell.")
     parser.add_argument("--no-herdr", action="store_true", help="Don't start the herdr server; run the model in the current shell.")
+    parser.add_argument(
+        "--no-attach",
+        action="store_true",
+        help="Don't auto-attach the user's terminal to the herdr agent. "
+             "Print the manual instruction block instead. Equivalent to "
+             "setting the AGENT_GO_NO_AUTO_ATTACH=1 environment variable.",
+    )
     parser.add_argument("--yes", action="store_true", help="Assume yes for any install prompts (default: assume yes; flag exists for symmetry).")
     parser.add_argument(
         "--print-cmd",
@@ -362,8 +524,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Step 5: launch the model.
     model = args.model or os.environ.get("AGENT_MODEL") or DEFAULT_MODEL
     info(f"model: {model}")
+    auto_attach = not args.no_attach
     if herdr_up and resolve_executable("claude"):
-        return _spawn_via_herdr_agent(repo, body, model)
+        return _spawn_via_herdr_agent(repo, body, model, auto_attach=auto_attach)
     if resolve_executable("claude"):
         return _spawn_claude(repo, model)
     return _spawn_ollama(repo, model)

@@ -335,3 +335,68 @@ def resolve_executable(name: str) -> Optional[str]:
 def to_json(data: object) -> str:
     """Serialise data as pretty JSON."""
     return json.dumps(data, indent=2, sort_keys=True)
+
+
+def parse_json_loose(text: str) -> Optional[dict]:
+    """Parse JSON from a string that may have leading non-JSON noise.
+
+    herdr's `--json` output is supposed to be a clean JSON envelope, but
+    some commands print a status line (e.g. `herdr: creating worktree...`)
+    before the JSON, and a few print multi-line pretty-printed JSON with
+    trailing whitespace. Calling `json.loads(text)` on those returns
+    `JSONDecodeError`. This helper:
+
+    1. Tries `json.loads(text)` first (fast path for clean input).
+    2. On failure, scans for the first balanced `{...}` substring and
+       tries `json.loads` on that.
+    3. Returns `None` if no parseable JSON object is found.
+
+    This is intentionally tolerant — it returns the first parseable JSON
+    object it finds. The herdr command surface emits a single JSON
+    envelope per invocation, so "first" is the right choice.
+    """
+    if not text:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    # Fast path: the whole string is a JSON object.
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, dict):
+            return loaded
+    except (ValueError, json.JSONDecodeError):
+        pass
+    # Slow path: scan for the first balanced {...} substring.
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for end in range(start, len(text)):
+            ch = text[end]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : end + 1]
+                    try:
+                        loaded = json.loads(candidate)
+                        if isinstance(loaded, dict):
+                            return loaded
+                    except (ValueError, json.JSONDecodeError):
+                        pass
+                    break
+        start = text.find("{", start + 1)
+    return None

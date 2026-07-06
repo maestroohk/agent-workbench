@@ -41,6 +41,7 @@ from utils import (
     find_repo_root,
     first_executable,
     info,
+    parse_json_loose,
     run_command,
 )
 
@@ -109,17 +110,34 @@ def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[
         name = f"fleet-{i}"
         wt_path = str(repo)
         if worktree:
-            wt_args = ["herdr", "worktree", "create", "--label", f"agent-{name}", "--no-focus", "--json"]
+            # Pass `--cwd <repo>` so herdr has an active workspace when no
+            # herdr workspace is currently set, and `--json` so we can
+            # parse the worktree path out of the envelope.
+            wt_args = [
+                "herdr", "worktree", "create",
+                "--cwd", str(repo),
+                "--label", f"agent-{name}",
+                "--no-focus", "--json",
+            ]
             wt_result = run_command(wt_args, cwd=repo)
             if wt_result.returncode != 0:
                 info(f"worktree create failed for {name}: {wt_result.stderr.strip()[:200]}; using {repo}")
             else:
-                # Try to parse the JSON; fall back to the repo root if parsing fails.
-                try:
-                    payload = json.loads(wt_result.stdout)
-                    wt_path = payload.get("path") or payload.get("worktree") or str(repo)
-                except json.JSONDecodeError:
-                    wt_path = wt_result.stdout.strip().splitlines()[-1] if wt_result.stdout.strip() else str(repo)
+                # Parse herdr's JSON envelope. Tolerant of two shapes:
+                #   1. {"worktree_created":{"worktree":{"path":"..."}}}
+                #   2. {"path":"..."}
+                payload = parse_json_loose(wt_result.stdout)
+                if payload:
+                    inner = payload.get("worktree_created") if isinstance(payload.get("worktree_created"), dict) else payload
+                    wt_obj = inner.get("worktree") if isinstance(inner, dict) else None
+                    if isinstance(wt_obj, dict) and wt_obj.get("path"):
+                        wt_path = str(wt_obj["path"])
+                    elif isinstance(inner, dict) and inner.get("path"):
+                        wt_path = str(inner["path"])
+                    else:
+                        info(f"worktree JSON for {name} did not contain a path; using {repo}")
+                else:
+                    info(f"worktree JSON for {name} did not parse; using {repo}")
         prompt = _fleet_prompt(repo, task, i, n, wt_path)
         if task_text:
             prompt = prompt.rstrip() + f"\n\n## Task\n\n{task_text.strip()}\n"
@@ -132,7 +150,7 @@ def _spawn_herdr(repo: Path, n: int, task: str, worktree: bool, model: Optional[
         cmd = [
             "herdr", "agent", "start", name,
             "--cwd", wt_path,
-            "--tab", "new",
+            "--split", "right",
             "--no-focus",
             "--",
             "claude",
