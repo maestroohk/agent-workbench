@@ -79,9 +79,9 @@ After installation, the following commands are available on `PATH`:
 | `agent-go`      | One-liner cold-machine bootstrap: install missing tools, start herdr, run claude with the global rules pre-applied |
 | `agent-bootstrap` | Install external dependencies (herdr, firstmate, no-mistakes, treehouse) on demand |
 | `agent-scan`    | Generate `.agent/` summaries for the current repository   |
-| `agent-check`   | Validate the repository (structure, firstmate doctor, no-mistakes doctor) |
+| `agent-check`   | Validate the repository (structure, firstmate harness, no-mistakes doctor) |
 | `agent-review`  | Print a review-ready system prompt for the repo           |
-| `agent-test`    | Run the detected test suite, or `firstmate test` if firstmate is installed |
+| `agent-test`    | Run the detected test suite (firstmate has no `test` subcommand upstream; this is the workbench's own test runner) |
 | `agent-claude`  | Launch Claude Code (or ollama) with the assembled system prompt |
 | `agent-fleet`   | Spawn N Claude agents in parallel, each in an isolated herdr pane and worktree |
 | `agent-overnight` | Run a `gnhf` overnight loop with safe defaults (worktree, iteration + token caps, dirty-repo preflight) |
@@ -181,9 +181,10 @@ is designed to orchestrate. By default, `--bootstrap` installs:
 | Tool | Why | Install source |
 | --- | --- | --- |
 | `herdr` | Agent multiplexer (default backend for `agent-fleet`) | `https://herdr.dev` |
-| `firstmate` | Per-project command orchestrator (`firstmate test` / `build` / `lint`) | `github.com/kunchenguid/firstmate` |
-| `no-mistakes` | Pre-push validation (`agent-check` invokes `no-mistakes check --all`) | `github.com/kunchenguid/no-mistakes` |
+| `firstmate` | Multi-agent command orchestrator harness (cloned to `~/firstmate`; shim at `~/.local/bin/firstmate`). Upstream ships a `bin/fm-*.sh` toolbelt, not a `firstmate doctor` / `test` / `build` CLI. | `github.com/kunchenguid/firstmate` |
+| `no-mistakes` | Pre-push validation gate (`agent-check` invokes `no-mistakes doctor` + `no-mistakes status`) | `github.com/kunchenguid/no-mistakes` |
 | `treehouse` | Git worktree pool (fallback backend for `agent-fleet`) | `github.com/kunchenguid/treehouse` |
+| `lavish-axi` | Local-first HTML authoring tool (opt-in: `agent-init --bootstrap=lavish-axi`) | `github.com/kunchenguid/lavish-axi` |
 
 Plus the model runtime: `claude` (Claude Code CLI) or `ollama` (local
 fallback), and the terminal: `wezterm` (fallback when herdr's mux is
@@ -203,9 +204,11 @@ Drop any of these into the repository root and they will be picked up automatica
 
 ## Supported operating systems
 
-- Windows 10 / 11 (PowerShell 5.1+ and PowerShell 7+)
+- Windows 10 / 11 — PowerShell 5.1+ and PowerShell 7+ (the installer also
+  drops bash shims alongside the .ps1 shims, so `agent-init`, `agent-go`,
+  etc. resolve in Git Bash and WSL on Windows without a separate profile)
 - Linux (any distribution with Python 3.10+)
-- WSL (treat as Linux)
+- WSL (treat as Linux; the bash shims are the primary install)
 - Docker (Debian/Ubuntu/Alpine base images)
 
 ## Supported technologies

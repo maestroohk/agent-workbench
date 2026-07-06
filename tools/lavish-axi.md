@@ -55,7 +55,12 @@ GitHub Copilot CLI.
 
 ## Integration with `agent-workbench`
 
-- `agent-init --bootstrap=lavish-axi` runs the `npx skills add` step.
+- `agent-init --bootstrap=lavish-axi` (or `--bootstrap=all`) installs
+  the `lavish-axi` npm package via `npm install -g lavish-axi` and
+  drops a `lavish-axi` binary on PATH. The `npx skills add
+  kunchenguid/lavish-axi --skill lavish` step is documented in the
+  lavish-axi README and is not currently automated by the workbench
+  (it requires the user's harness to support the skills flow).
 - The workbench does not auto-invoke lavish-axi; the agent itself
   decides when annotation is appropriate.
 

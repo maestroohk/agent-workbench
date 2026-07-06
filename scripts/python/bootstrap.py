@@ -56,12 +56,19 @@ DEPENDENCIES: dict[str, dict] = {
         ],
     },
     "firstmate": {
-        "probe": "claude",  # firstmate is a directory + AGENTS.md harness; presence is best probed via the claude CLI it drives
-        "purpose": "Per-project command orchestrator (firstmate test / build / lint). Clone github.com/kunchenguid/firstmate.",
+        # firstmate is a directory + AGENTS.md harness (NOT a CLI binary with
+        # `firstmate doctor` / `firstmate test` subcommands). Presence is best
+        # detected by the harness's AGENTS.md file. The `firstmate` shim we
+        # install after the clone is what `agent-check` calls; if the shim is
+        # missing but the harness is present, we still consider firstmate
+        # installed.
+        "probe": "firstmate",
+        "purpose": "Per-project command orchestrator harness (kunchenguid/firstmate). Clone github.com/kunchenguid/firstmate to ${HOME}/firstmate.",
         "install": [
             {"any": ["git", "clone", "https://github.com/kunchenguid/firstmate.git", "${HOME}/firstmate"]},
         ],
         "presence_hint": "${HOME}/firstmate/AGENTS.md",
+        "post_install": "_ensure_firstmate_shim",
     },
     "no-mistakes": {
         "probe": "no-mistakes",
@@ -81,9 +88,17 @@ DEPENDENCIES: dict[str, dict] = {
     },
     "gnhf": {
         "probe": "gnhf",
-        "purpose": "Overnight autonomous agent runner.",
+        # gnhf is a Go binary published at github.com/kunchenguid/gnhf.
+        # The previous install method (`npm install -g gnhf`) was wrong
+        # — npm has no such package, and the silent failure mode
+        # confused users. Now we use the same _github_release path as
+        # no-mistakes and treehouse. As of 2026-07-06 the upstream
+        # ships darwin/linux releases; Windows is best-effort and the
+        # install will surface an honest "no asset" error rather than
+        # a silent failure.
+        "purpose": "Overnight autonomous agent runner (kunchenguid/gnhf, Go binary).",
         "install": [
-            {"any": ["npm", "install", "-g", "gnhf"]},
+            {"any": ["_github_release", "kunchenguid/gnhf", "gnhf"]},
         ],
     },
     "ollama": {
@@ -101,6 +116,18 @@ DEPENDENCIES: dict[str, dict] = {
         "purpose": "Anthropic Claude Code CLI. The actual agent runtime for agent-claude and agent-fleet.",
         "install": [
             {"any": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
+        ],
+    },
+    "lavish-axi": {
+        # lavish-axi is an npm package AND an agent skill (kunchenguid/lavish-axi).
+        # The probe checks for the binary that `npm install -g lavish-axi` lands.
+        # We do NOT add this to DEFAULT_BOOTSTRAP_SET: the default install
+        # stays focused on the runtime toolchain; lavish-axi is an authoring
+        # tool and is opt-in via --bootstrap=lavish-axi or --all.
+        "probe": "lavish-axi",
+        "purpose": "Local-first HTML authoring tool for human + AI collaboration on HTML artifacts (kunchenguid/lavish-axi).",
+        "install": [
+            {"any": ["npm", "install", "-g", "lavish-axi"]},
         ],
     },
 }
@@ -249,9 +276,30 @@ def _run_method(method_args: list[str], *, timeout: int = _DEFAULT_INSTALL_TIMEO
             expanded[0] = full
         else:
             return False, "powershell/pwsh not on PATH; cannot run Windows installer"
+    # On Windows, `subprocess.run` cannot find a bare `npm` / `npx` /
+    # `node` because the real binaries are `npm.cmd` / `npx.cmd` /
+    # `node.exe` (or, for npm installed via npm itself, a wrapper shim
+    # without an extension that CreateProcess won't execute). Resolve
+    # the first arg to its real path so CreateProcess can find it. If
+    # the name already has an extension (.cmd / .exe / .ps1 / .bat) the
+    # shutil.which lookup will still find it.
+    if expanded and os.name == "nt" and not os.path.isabs(expanded[0]):
+        resolved = shutil.which(expanded[0])
+        if resolved:
+            # Python's shutil.which respects PATHEXT but returns the
+            # first match, which on a Node.js install is the bare
+            # `npm` (a shim script). CreateProcess on Windows rejects
+            # that with WinError 193. If the resolved path doesn't end
+            # in a recognized executable extension, prefer `name.cmd`.
+            _, ext = os.path.splitext(resolved)
+            if ext.lower() not in (".exe", ".cmd", ".bat", ".ps1", ".com"):
+                cmd_alt = shutil.which(expanded[0] + ".cmd")
+                if cmd_alt:
+                    resolved = cmd_alt
+            expanded[0] = resolved
     info(f"trying: {' '.join(expanded[:3])}…")
     try:
-        result = subprocess.run(expanded, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(expanded, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except FileNotFoundError as exc:
         return False, f"executable not found: {expanded[0]} ({exc})"
     except subprocess.TimeoutExpired as exc:
@@ -322,7 +370,14 @@ def _install_from_github_release(repo: str, binary_name: str, *, timeout: int = 
     #   <binary_name>-<tag>-<os>-<arch>.<ext>
     # e.g. no-mistakes-v1.31.2-windows-amd64.zip
     #      treehouse-v2.0.0-darwin-arm64.tar.gz
-    asset_name = f"{binary_name}-{tag}-{os_part}-{arch}.{ext}"
+    # Some projects (e.g. gnhf) tag their releases `<binary_name>-vX.Y.Z`
+    # already, so the binary name is duplicated if we concatenate. Strip
+    # a single leading `<binary_name>-` from the tag if present.
+    if tag.lower().startswith(f"{binary_name.lower()}-"):
+        clean_tag = tag[len(binary_name) + 1:]
+    else:
+        clean_tag = tag
+    asset_name = f"{binary_name}-{clean_tag}-{os_part}-{arch}.{ext}"
     download_url = None
     for asset in release.get("assets", []):
         if asset.get("name") == asset_name:
@@ -330,7 +385,7 @@ def _install_from_github_release(repo: str, binary_name: str, *, timeout: int = 
             break
     if not download_url:
         # Fallback: tag without leading "v".
-        bare = f"{binary_name}-{tag.lstrip('v')}-{os_part}-{arch}.{ext}"
+        bare = f"{binary_name}-{clean_tag.lstrip('v')}-{os_part}-{arch}.{ext}"
         for asset in release.get("assets", []):
             if asset.get("name") == bare:
                 download_url = asset.get("browser_download_url")
@@ -388,18 +443,87 @@ def _install_from_github_release(repo: str, binary_name: str, *, timeout: int = 
     return True, f"installed {binary_name} {tag} from {repo}@{tag}"
 
 
+# --- Post-install hooks ---------------------------------------------------
+# A handful of tools need a small follow-up step (a PATH shim, a config
+# write) after the install method succeeds. Each hook takes the
+# DependencyStatus returned by the install method and returns the same
+# status after applying its post-install work. Hooks are no-ops when
+# there's nothing to do.
+
+def _ensure_firstmate_shim(status: DependencyStatus) -> DependencyStatus:
+    """Drop a `firstmate` shim in ~/.local/bin/ that execs the harness.
+
+    `firstmate` upstream is a directory of `bin/fm-*.sh` scripts + an
+    AGENTS.md operating manual, not a single binary. The shim we write
+    here dispatches `firstmate <verb>` to `fm-<verb>.sh` in the
+    harness's bin/, which is the closest stable mapping. Verb names
+    that don't map cleanly to an fm-*.sh are still passed through; the
+    fm-*.sh scripts handle their own arg parsing.
+    """
+    from utils import AGENT_BIN_DIR
+
+    harness_bin = Path(os.path.expandvars("${HOME}/firstmate/bin"))
+    if not harness_bin.is_dir():
+        # Harness not actually installed (clone failed or was partial).
+        return status
+
+    AGENT_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    shim = AGENT_BIN_DIR / "firstmate"
+    # On Windows the shim is a tiny .cmd that calls bash; on unix it is
+    # an executable bash script. Both dispatch the same way: pass
+    # through to fm-<verb>.sh, or to fm-bootstrap.sh if no verb was given.
+    if os.name == "nt":
+        shim_path = AGENT_BIN_DIR / "firstmate.cmd"
+        shim_path.write_text(
+            "@echo off\r\n"
+            f'bash "{harness_bin.as_posix()}/firstmate" %*\r\n',
+            encoding="utf-8",
+        )
+        shim = shim_path
+    else:
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            f'exec "{harness_bin.as_posix()}/firstmate" "$@"\n',
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+    info(f"firstmate: shim installed at {shim}")
+    return status
+
+
+def _run_post_install(name: str, status: DependencyStatus) -> DependencyStatus:
+    """Run the post-install hook for `name` if one is registered."""
+    dep = DEPENDENCIES.get(name)
+    if not dep:
+        return status
+    hook_name = dep.get("post_install")
+    if not hook_name:
+        return status
+    hook = globals().get(hook_name)
+    if hook is None:
+        info(f"{name}: post_install hook {hook_name!r} not found")
+        return status
+    try:
+        return hook(status)
+    except Exception as exc:  # noqa: BLE001 — best-effort follow-up
+        info(f"{name}: post_install {hook_name!r} failed: {type(exc).__name__}: {exc}")
+        return status
+
+
 def install_dependency(name: str, *, platform_name: Optional[str] = None) -> DependencyStatus:
     """Install one dependency, trying each method in order. Idempotent."""
     dep = DEPENDENCIES.get(name)
     if not dep:
         return DependencyStatus(name=name, purpose="(unknown)", present=False, error="no such dependency")
 
-    # Already present? Skip.
+    # Already present? Run any post-install hook anyway — shims might
+    # be missing even when the underlying tool is fine. The hook is a
+    # no-op when there's nothing to do.
     current = check_dependencies([name])[0]
     if current.present:
         info(f"{name}: already present at {current.path or dep.get('presence_hint')}")
         current.installed_by = "(already installed)"
-        return current
+        return _run_post_install(name, current)
 
     platform_name = platform_name or detect_platform()
     last_error = ""
@@ -414,7 +538,7 @@ def install_dependency(name: str, *, platform_name: Optional[str] = None) -> Dep
                     after.installed_by = f"{key}: {args[0] if args else '?'}"
                     if after.present:
                         info(f"{name}: installed via {after.installed_by}")
-                        return after
+                        return _run_post_install(name, after)
                     last_error = f"{args[0]} exit 0 but {name} still not on PATH ({output[:120]})"
                 else:
                     last_error = f"{args[0] if args else '?'} failed: {output[:200]}"

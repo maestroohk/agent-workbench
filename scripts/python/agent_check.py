@@ -51,31 +51,54 @@ def _check_no_secrets(repo: Path) -> list[str]:
 
 
 def _check_firstmate(repo: Path, findings: list[tuple[str, str]]) -> None:
+    """Report on the firstmate harness's install state.
+
+    Previous behaviour called `firstmate doctor` and `firstmate build`,
+    neither of which exists upstream; the call paths silently failed
+    and the workbench never reported on firstmate. The new behaviour
+    surfaces the harness install path and the most recent commit, and
+    reports any `fm-bootstrap.sh` preflight output when available.
+    """
     if not agent_doctor.firstmate_present(repo):
+        findings.append(("info", "firstmate: not installed (run `agent-init --bootstrap=firstmate`)"))
         return
-    rc, output = agent_doctor.run_doctor(repo)
-    if rc == 127:
-        findings.append(("warn", output.strip()))
-        return
-    if rc != 0:
-        findings.append(("err", f"firstmate doctor failed (rc={rc})"))
+    version = agent_doctor.firstmate_version()
+    harness = agent_doctor.FIRSTMATE_HARNESS_DIR
+    if version:
+        findings.append(("ok", f"firstmate: installed at {harness} ({version})"))
     else:
-        findings.append(("ok", "firstmate doctor passed"))
-    for line in output.splitlines()[:20]:
-        if line.strip():
-            findings.append(("info", f"firstmate: {line.strip()[:120]}"))
+        findings.append(("ok", f"firstmate: installed at {harness}"))
+    # The shim is what `agent-check` would actually call. Surface
+    # whether it's resolvable on PATH.
+    import shutil
+    shim = shutil.which("firstmate")
+    if shim:
+        findings.append(("info", f"firstmate: shim on PATH at {shim}"))
+    else:
+        findings.append(("info", "firstmate: no shim on PATH (harness only); use `agent-init --bootstrap=firstmate` to install the shim"))
+
+    # Best-effort: call firstmate doctor so users see the harness's
+    # own preflight if it has one. Surface a clean info line on
+    # non-zero so we don't claim a check that didn't run.
+    rc, output = agent_doctor.run_doctor(repo)
+    if rc == 0:
+        for line in output.splitlines()[:10]:
+            line = line.strip()
+            if line:
+                findings.append(("info", f"firstmate: {line[:120]}"))
+    else:
+        findings.append(("warn", f"firstmate doctor returned {rc}: {output.strip()[:120]}"))
 
 
 def _check_firstmate_build(repo: Path, findings: list[tuple[str, str]]) -> None:
+    """firstmate has no `build` subcommand; surface that explicitly."""
     if not agent_doctor.firstmate_present(repo):
         return
     rc, output = agent_doctor.run_build(repo)
-    if rc == 127:
-        return
-    if rc != 0:
-        findings.append(("warn", f"firstmate build failed (rc={rc})"))
-    else:
-        findings.append(("ok", "firstmate build passed"))
+    # run_build always returns rc=0 with a skip-message, so this branch
+    # is informational only. Future-proof against upstream adding one.
+    if output.strip():
+        findings.append(("info", f"firstmate build: {output.strip()[:120]}"))
 
 
 def _check_no_mistakes(repo: Path, findings: list[tuple[str, str]]) -> None:

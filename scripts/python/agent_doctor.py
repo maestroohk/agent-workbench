@@ -1,9 +1,10 @@
 """Wrapper for `firstmate doctor` (and `firstmate build`).
 
-`firstmate` is both a CLI binary and a directory-of-skills harness
-(~/firstmate/AGENTS.md). When the repo has a `firstmate.toml`, the
-workbench can call `firstmate doctor` to validate the toolchain and
-`firstmate build` to compile/assemble the project.
+`firstmate` is a directory-of-skills harness at `~/firstmate/AGENTS.md`
+plus a `bin/fm-*.sh` toolbelt. It does NOT ship a `firstmate doctor`
+or `firstmate test` subcommand — those names appear in the workbench
+docs and the original `agent_doctor` shim creation assumed them, but
+upstream has never had them.
 
 This module probes both forms (binary on PATH, harness at ~/firstmate)
 and falls back gracefully when firstmate is not installed.
@@ -24,58 +25,85 @@ FIRSTMATE_HARNESS_DIR = Path(os.path.expandvars("${HOME}/firstmate"))
 
 
 def firstmate_present(repo: Optional[Path] = None) -> bool:
-    """True if firstmate is installed AND the repo opts in (has firstmate.toml)."""
+    """True if firstmate is installed (shim on PATH or harness at ~/firstmate).
+
+    The previous version required a `firstmate.toml` in the repo, on the
+    theory that firstmate is opt-in per project. Upstream firstmate has
+    no such config format; the requirement made the workbench *never*
+    report on firstmate. A `repo` argument is still accepted for
+    backward compatibility, but no longer gates the result.
+    """
     has_binary = shutil.which("firstmate") is not None
     has_harness = (FIRSTMATE_HARNESS_DIR / "AGENTS.md").is_file()
-    if not (has_binary or has_harness):
-        return False
-    if repo is not None and not (repo / "firstmate.toml").is_file():
-        return False
-    return True
+    return has_binary or has_harness
+
+
+def firstmate_version() -> Optional[str]:
+    """Best-effort version string for an installed firstmate harness.
+
+    Returns the most recent commit SHA in the clone, or None if the
+    harness is not installed. Upstream has no release tags, so a
+    commit hash is the most honest answer.
+    """
+    if not (FIRSTMATE_HARNESS_DIR / ".git").is_dir():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(FIRSTMATE_HARNESS_DIR), "log", "--oneline", "-1"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.strip()[:80]
 
 
 def _firstmate_cmd() -> Optional[list[str]]:
-    """Return the command to invoke firstmate, or None if not installed."""
+    """Return the command to invoke firstmate, or None if not installed.
+
+    Order of preference:
+    1. A `firstmate` binary on PATH (set up by the bootstrap shim).
+    2. The harness at ~/firstmate/bin/firstmate if it exists.
+    3. None.
+    """
     bin_path = shutil.which("firstmate")
     if bin_path:
         return [bin_path]
-    if (FIRSTMATE_HARNESS_DIR / "AGENTS.md").is_file():
-        # The harness is launched by `claude` in its own directory; expose a
-        # simple alias so callers get a stable command name.
-        alias = FIRSTMATE_HARNESS_DIR / "bin" / "firstmate"
-        if not alias.is_file():
-            alias.parent.mkdir(parents=True, exist_ok=True)
-            alias.write_text(
-                "#!/usr/bin/env bash\n"
-                "exec claude --cwd \"$HOME/firstmate\" \"$@\"\n",
-                encoding="utf-8",
-            )
-            try:
-                alias.chmod(0o755)
-            except OSError:
-                pass
-        return [str(alias)]
+    harness_entry = FIRSTMATE_HARNESS_DIR / "bin" / "firstmate"
+    if harness_entry.is_file():
+        return [str(harness_entry)]
     return None
 
 
 def run_doctor(repo: Path) -> tuple[int, str]:
-    """Run `firstmate doctor` in the repo. Returns (returncode, combined-output)."""
-    cmd = _firstmate_cmd()
-    if cmd is None:
+    """Surface the firstmate harness's own preflight state.
+
+    Upstream firstmate has no `firstmate doctor` subcommand. The
+    workbench historically called it anyway and silently swallowed
+    the failure. We now do a real preflight check: enumerate the
+    `bin/fm-*.sh` toolbelt and the `AGENTS.md` ops manual so the
+    `agent-check` report is honest about what is and isn't there.
+    """
+    if not firstmate_present(repo):
         return 127, "firstmate not installed (run `agent-init --bootstrap=firstmate`)"
-    info("firstmate doctor …")
-    result = run_command([*cmd, "doctor"], cwd=repo)
-    return result.returncode, result.combined()
+    info("firstmate preflight …")
+    harness_bin = FIRSTMATE_HARNESS_DIR / "bin"
+    scripts = sorted(p.name for p in harness_bin.glob("fm-*.sh")) if harness_bin.is_dir() else []
+    agents_md = (FIRSTMATE_HARNESS_DIR / "AGENTS.md").is_file()
+    if not scripts and not agents_md:
+        return 1, f"firstmate harness at {FIRSTMATE_HARNESS_DIR} is incomplete (no bin/fm-*.sh, no AGENTS.md)"
+    return 0, f"harness at {FIRSTMATE_HARNESS_DIR}: {len(scripts)} fm-*.sh scripts, AGENTS.md={'present' if agents_md else 'missing'}"
 
 
 def run_build(repo: Path) -> tuple[int, str]:
-    """Run `firstmate build` in the repo. Returns (returncode, combined-output)."""
-    cmd = _firstmate_cmd()
-    if cmd is None:
-        return 127, "firstmate not installed"
-    info("firstmate build …")
-    result = run_command([*cmd, "build"], cwd=repo)
-    return result.returncode, result.combined()
+    """`firstmate build` is not a real upstream subcommand. Report that.
+
+    The workbench's `agent-check` previously tried to call this and
+    silently swallowed the failure. We surface a clear skip-message
+    so the report is honest.
+    """
+    return 0, "firstmate: no `build` subcommand upstream (workbench skips)"
 
 
 def run_no_mistakes_doctor(repo: Path) -> tuple[int, str]:
