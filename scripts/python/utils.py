@@ -260,10 +260,76 @@ def ensure_on_path(bin_dir: Path) -> None:
 def first_executable(candidates: list[str]) -> Optional[str]:
     """Return the first candidate that resolves to an executable on PATH."""
     for name in candidates:
-        resolved = shutil.which(name)
+        resolved = resolve_executable(name)
         if resolved:
             return resolved
     return None
+
+
+# On Windows, `shutil.which(name)` returns the first PATH match, which
+# for npm-installed tools (claude, gnhf) is the bare Node.js shim — a
+# `.cmd`/`.bat` shim script, not a PE binary. `CreateProcessW` rejects
+# those with `WinError 193: %1 is not a valid Win32 application`, so
+# the caller's `subprocess.run` blows up. The fix is to look for the
+# Windows-executable forms explicitly and prefer them. Order matters:
+# `.cmd` / `.bat` are checked before `.exe` because most npm-published
+# CLIs ship a `.cmd` entry point and no `.exe`.
+_WINDOWS_EXECUTABLE_SUFFIXES = (".cmd", ".bat", ".exe")
+
+
+def resolve_executable(name: str) -> Optional[str]:
+    """Resolve `name` to an executable path on this platform.
+
+    On Windows, prefers `name.cmd` / `name.bat` / `name.exe` over the
+    bare shim so `subprocess.run` does not hit `WinError 193`. On
+    non-Windows, returns `shutil.which(name)` unchanged.
+
+    If `name` already carries a Windows suffix (e.g. "claude.cmd"),
+    that suffix is tried first; the rest of the order is the same.
+    """
+    if os.name == "nt":
+        # On Windows, `shutil.which("claude")` returns the bare npm
+        # shim path if both `claude` and `claude.cmd` exist on PATH
+        # (the bare shim satisfies `shutil.which` because Windows'
+        # `PATHEXT` lists `.CMD`/`.BAT`/`.EXE` and the kernel
+        # `CreateProcessW` accepts a bare shim path). But that bare
+        # shim is a Node.js script, NOT a PE binary, and
+        # `subprocess.run` calling `CreateProcessW` on it returns
+        # `WinError 193: %1 is not a valid Win32 application`.
+        #
+        # Fix: try the Windows-executable forms *first* (`.cmd`,
+        # `.bat`, `.exe`), and only fall back to the bare name if
+        # none of those resolve. Order matters: `.cmd` / `.bat` are
+        # checked before `.exe` because most npm-published CLIs ship
+        # a `.cmd` entry point and no `.exe`.
+        #
+        # If `name` already carries a suffix, that suffix is the first
+        # candidate — `shutil.which("claude.cmd")` returns the right
+        # path on the first try, and the loop degenerates to a no-op.
+        candidates: list[str] = []
+        for sfx in _WINDOWS_EXECUTABLE_SUFFIXES:
+            if name.endswith(sfx):
+                candidates.append(name)
+                break
+        else:
+            # `name` had no recognized suffix. Add it last so the
+            # suffixed forms get first pick.
+            pass
+        for sfx in _WINDOWS_EXECUTABLE_SUFFIXES:
+            if not name.endswith(sfx):
+                candidates.append(name + sfx)
+        # Only fall back to the bare name if it does NOT have a
+        # recognized suffix. If it does, the suffixed forms have
+        # already been added above.
+        has_suffix = any(name.endswith(sfx) for sfx in _WINDOWS_EXECUTABLE_SUFFIXES)
+        if not has_suffix:
+            candidates.append(name)
+        for candidate in candidates:
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return None
+    return shutil.which(name)
 
 
 def to_json(data: object) -> str:
