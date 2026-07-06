@@ -1,9 +1,13 @@
 # agent-workbench: validate the current repository.
+#
+# Thin pass-through — see agent-go.ps1 for the rationale. All user args
+# land in $Rest and are forwarded verbatim to `dispatch.py check`. The
+# inner `agent_check.main()` is the single source of truth for argument
+# parsing.
 [CmdletBinding()]
 param(
-    [string]$Repo,
-    [switch]$NoFirstmate,
-    [switch]$NoNoMistakes
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,10 +54,5 @@ if (-not $python) {
     exit 127
 }
 
-$forward = @('check')
-if ($Repo) { $forward += @('--repo', $Repo) }
-if ($NoFirstmate) { $forward += '--no-firstmate' }
-if ($NoNoMistakes) { $forward += '--no-no-mistakes' }
-
-& $python (Join-Path $PythonDir 'dispatch.py') @forward
+& $python (Join-Path $PythonDir 'dispatch.py') 'check' @Rest
 exit $LASTEXITCODE
